@@ -1,5 +1,5 @@
 // Caches the app shell so it opens instantly. Scans always go to the network.
-const CACHE = "edge-scan-v2";
+const CACHE = "edge-scan-v3";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon.png"];
 self.addEventListener("install", e => { self.skipWaiting(); e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); });
 self.addEventListener("activate", e => e.waitUntil(
