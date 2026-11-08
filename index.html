@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Edge Scan">
+<meta name="theme-color" content="#0d1117">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon.png">
+<title>Edge Scan</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0;
+         padding: calc(env(safe-area-inset-top) + 8px) 16px calc(env(safe-area-inset-bottom) + 40px); }
+  h1 { font-size:26px; margin:12px 0 4px; }
+  button { width:100%; padding:16px; font-size:18px; font-weight:600; border:0; border-radius:14px; background:#238636; color:#fff; }
+  button:disabled { background:#30363d; color:#8b949e; }
+  label { display:flex; align-items:center; gap:8px; margin:14px 0; color:#c9d1d9; }
+  .card { background:#161b22; border-radius:14px; padding:14px; margin:12px 0; border-left:5px solid #2ea043; line-height:1.45; }
+  .card.near { border-left-color:#d29922; }
+  .tag { font-weight:700; color:#2ea043; font-size:14px; letter-spacing:.3px; } .near .tag { color:#d29922; }
+  .muted { color:#8b949e; font-size:14px; } a { color:#58a6ff; }
+  .big { font-size:20px; font-weight:700; margin:2px 0 6px; }
+  .pct { font-size:22px; font-weight:800; }
+  details { margin-top:16px; } summary { color:#8b949e; }
+</style>
+</head>
+<body>
+<h1>🌡️ Edge Scan</h1>
+<p class="muted">Polymarket daily-high edge buckets vs the Open-Meteo forecast at each market's settlement airport.</p>
+<label><input type="checkbox" id="near"> Include near misses (within 1°)</label>
+<button id="scan">Scan</button>
+<p id="status" class="muted"></p>
+<div id="results"></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtDate = d => new Date(d + "T12:00:00Z").toLocaleDateString(undefined, { weekday:"short", month:"short", day:"numeric", timeZone:"UTC" });
+
+$("scan").onclick = async () => {
+  const btn = $("scan");
+  btn.disabled = true; btn.textContent = "Scanning…"; $("results").innerHTML = ""; $("status").textContent = "";
+  try {
+    const near = $("near").checked ? 1 : 0;
+    const r = await fetch(`/api/scan?near=${near}&t=${Date.now()}`);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    $("status").textContent = `${data.marketsFound} markets checked · ${data.hits.length} hit${data.hits.length === 1 ? "" : "s"} · ${new Date(data.scannedAt).toLocaleTimeString()}`;
+    let html = "";
+    if (!data.hits.length) html = `<div class="card near">No edge hits right now.</div>`;
+    for (const h of data.hits) {
+      const sign = h.past > 0 ? `${h.past}° past the line` : h.past === 0 ? "right on the line" : `${Math.abs(h.past)}° short`;
+      html += `<div class="card ${h.nearMiss ? "near" : ""}">
+        <div class="tag">${h.nearMiss ? "🟡 NEAR MISS · " + h.side : "🟢 " + h.side + " EDGE HIT"}</div>
+        <div class="big">${esc(h.city)} · ${fmtDate(h.date)}</div>
+        <div>Bucket: <b>${esc(h.bucket)}</b></div>
+        <div>Market: <span class="pct">${h.yesPct ?? "?"}%</span> Yes <span class="muted">/ ${h.noPct ?? "?"}% No</span></div>
+        <div>Open-Meteo high: <b>${h.forecast}°${h.unit}</b> <span class="muted">(rounds to ${h.rounded}°, ${sign})</span></div>
+        <div class="muted">Station: ${esc(h.station)} – ${esc(h.stationName)}</div>
+        <a href="${esc(h.url)}" target="_blank" rel="noopener">Open on Polymarket →</a>
+      </div>`;
+    }
+    if (data.skipped.length) html += `<details><summary>Skipped ${data.skipped.length} market(s)</summary>${data.skipped.map(s => `<p class="muted">${esc(s.title)} – ${esc(s.reason)}</p>`).join("")}</details>`;
+    $("results").innerHTML = html;
+  } catch (e) {
+    $("status").textContent = "Error: " + e.message;
+  }
+  btn.disabled = false; btn.textContent = "Scan";
+};
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+</script>
+</body>
+</html>
