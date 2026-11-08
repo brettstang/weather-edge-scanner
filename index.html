@@ -25,7 +25,8 @@
   .muted { color:#8b949e; font-size:14px; } a { color:#58a6ff; }
   .big { font-size:20px; font-weight:700; margin:2px 0 6px; }
   .pct { font-size:22px; font-weight:800; }
-  details { margin-top:16px; } summary { color:#8b949e; }
+  details { margin-top:16px; } summary { color:#8b949e; padding:6px 0; }
+  .row { border-top:1px solid #21262d; padding:10px 0; font-size:15px; line-height:1.45; }
 </style>
 </head>
 <body>
@@ -48,7 +49,8 @@ $("scan").onclick = async () => {
     const r = await fetch(`/api/scan?near=${near}&t=${Date.now()}`);
     const data = await r.json();
     if (data.error) throw new Error(data.error);
-    $("status").textContent = `${data.marketsFound} markets checked · ${data.hits.length} hit${data.hits.length === 1 ? "" : "s"} · ${new Date(data.scannedAt).toLocaleTimeString()}`;
+    const open = (data.overview || []).length;
+    $("status").textContent = `${open} open markets checked · ${data.hits.length} hit${data.hits.length === 1 ? "" : "s"} · ${new Date(data.scannedAt).toLocaleTimeString()}`;
     let html = "";
     if (!data.hits.length) html = `<div class="card near">No edge hits right now.</div>`;
     for (const h of data.hits) {
@@ -62,6 +64,16 @@ $("scan").onclick = async () => {
         <div class="muted">Station: ${esc(h.station)} – ${esc(h.stationName)}</div>
         <a href="${esc(h.url)}" target="_blank" rel="noopener">Open on Polymarket →</a>
       </div>`;
+    }
+    if (open) {
+      const edge = e => e ? `${esc(e.label)} <b>${e.yesPct ?? "?"}%</b>` : "–";
+      html += `<details><summary>All markets (${open})</summary>${data.overview.map(o => `
+        <div class="row">
+          <div><b>${esc(o.city)}</b> · ${fmtDate(o.date)} <span class="muted">· ${esc(o.station)}</span></div>
+          <div class="muted">Low edge: ${edge(o.low)}</div>
+          <div>Forecast high: <b>${o.forecast}°${o.unit}</b></div>
+          <div class="muted">High edge: ${edge(o.high)}</div>
+        </div>`).join("")}</details>`;
     }
     if (data.skipped.length) html += `<details><summary>Skipped ${data.skipped.length} market(s)</summary>${data.skipped.map(s => `<p class="muted">${esc(s.title)} – ${esc(s.reason)}</p>`).join("")}</details>`;
     $("results").innerHTML = html;

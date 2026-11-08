@@ -37,8 +37,15 @@ const STATIONS = {
   CYYZ: [43.6777, -79.6248, "Toronto Pearson"],
   NZWN: [-41.3272, 174.8053, "Wellington"],
   SAEZ: [-34.8222, -58.5358, "Buenos Aires Ezeiza"],
-  LTAC: [40.1281, 32.9951, "Ankara Esenboga"]
+  LTAC: [40.1281, 32.9951, "Ankara Esenboga"],
+  // Non-airport settlement sources
+  HKO: [22.3022, 114.1742, "Hong Kong Observatory HQ, Tsim Sha Tsui"]
 };
+
+// Markets that name an official observatory in words instead of an airport code.
+const NAMED_SOURCES = [
+  [/hong kong observatory/i, "HKO"]
+];
 
 let airportCache = null;
 async function lookupStation(code) {
@@ -88,6 +95,7 @@ async function getTempEvents() {
 function findStation(ev) {
   const text = [ev.resolutionSource, ev.description, ...(ev.markets || []).flatMap(m => [m.resolutionSource, m.description])]
     .filter(Boolean).join(" ");
+  for (const [re, code] of NAMED_SOURCES) if (re.test(text)) return code;
   // Weather Underground history links end in the ICAO code, e.g. .../history/daily/us/ny/new-york-city/KLGA
   const wu = text.match(/wunderground\.com\/[^\s"')]*?\/([A-Z]{4})(?=[\/\s"')?#.]|$)/);
   if (wu) return wu[1];
@@ -138,12 +146,15 @@ async function forecastHigh(lat, lon, unit, date) {
   const data = await forecastCache[key];
   const d = data.daily;
   const i = d ? d.time.indexOf(date) : -1;
-  return i >= 0 ? d.temperature_2m_max[i] : null;
+  // The station's local date right now, so finished days can be skipped.
+  const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
+  return { value: i >= 0 ? d.temperature_2m_max[i] : null, localToday };
 }
 
 export default async function handler(req, res) {
   const near = parseFloat((req.query && req.query.near) || "0") || 0;
-  const hits = [], skipped = [];
+  const hits = [], skipped = [], overview = [];
+  let finished = 0;
   try {
     const events = await getTempEvents();
     await Promise.all(events.map(async ev => {
@@ -152,33 +163,42 @@ export default async function handler(req, res) {
       if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
       const date = parseDate(ev);
       const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+      const row = { city, date, station: code, stationName: st[2], unit: null, forecast: null, low: null, high: null,
+                    url: `https://polymarket.com/event/${ev.slug}` };
+      let isFinished = false;
       for (const m of ev.markets || []) {
         if (m.closed) continue;
         const label = m.groupItemTitle || m.question || "";
         const b = parseBucket(label);
         if (!b) continue;
-        let fc;
-        try { fc = await forecastHigh(st[0], st[1], b.unit, date); } catch { fc = null; }
+        let f;
+        try { f = await forecastHigh(st[0], st[1], b.unit, date); } catch { f = null; }
+        if (f && date < f.localToday) { isFinished = true; break; }
+        const fc = f ? f.value : null;
         if (fc == null) continue;
+        const p = yesPrice(m);
+        const yesPct = p == null ? null : Math.round(p * 1000) / 10;
+        row.unit = b.unit; row.forecast = fc;
+        row[b.side === "LOW" ? "low" : "high"] = { threshold: b.value, label, yesPct };
         const r = Math.round(fc);
         const past = b.side === "HIGH" ? r - b.value : b.value - r;
         if (past >= -near) {
-          const p = yesPrice(m);
           hits.push({
             city, date, side: b.side, bucket: label,
             threshold: b.value, unit: b.unit, forecast: fc, rounded: r, past,
-            yesPct: p == null ? null : Math.round(p * 1000) / 10,
-            noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
+            yesPct, noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
             station: code, stationName: st[2], lat: st[0], lon: st[1],
-            url: `https://polymarket.com/event/${ev.slug}`,
-            nearMiss: past < 0
+            url: row.url, nearMiss: past < 0
           });
         }
       }
+      if (isFinished) { finished++; return; }
+      if (row.forecast != null) overview.push(row);
     }));
-    hits.sort((a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city));
+    const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
+    hits.sort(byDate); overview.sort(byDate);
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, hits, skipped });
+    res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, finished, hits, overview, skipped });
   } catch (e) {
     res.status(500).json({ error: String(e && e.message || e) });
   }
