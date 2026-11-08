@@ -254,7 +254,10 @@ $("scan").onclick = async () => {
   try {
     const near = $("near").checked ? 1 : 0;
     const r = await fetch(`/api/scan?near=${near}&t=${Date.now()}`);
-    const data = await r.json();
+    const body = await r.text();
+    let data;
+    try { data = JSON.parse(body); }
+    catch { throw new Error(`Server returned ${r.status}${r.status === 504 ? " (scan timed out)" : ""}: ${body.slice(0, 120)}`); }
     if (data.error) throw new Error(data.error);
     render(data);
   } catch (e) {

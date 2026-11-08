@@ -67,7 +67,7 @@ async function lookupStation(code) {
 }
 
 async function getJSON(url) {
-  const r = await fetch(url, { headers: { accept: "application/json" } });
+  const r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(8000) });
   if (!r.ok) throw new Error(`${r.status} from ${url}`);
   return r.json();
 }
@@ -76,9 +76,9 @@ const isTempEvent = ev => /highest temperature in/i.test(ev.title || "");
 const MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
 
 // Page through a Gamma list endpoint 100 at a time with no gaps, in parallel waves.
-async function pageAll(base, maxPages = 60) {
+async function pageAll(base, maxPages, deadline) {
   const out = [];
-  for (let start = 0; start < maxPages; start += 10) {
+  for (let start = 0; start < maxPages && Date.now() < deadline; start += 10) {
     const wave = await Promise.all(Array.from({ length: 10 }, (_, i) =>
       getJSON(`${base}&limit=100&offset=${(start + i) * 100}`).catch(() => [])));
     let done = false;
@@ -92,38 +92,38 @@ async function pageAll(base, maxPages = 60) {
   return out;
 }
 
-async function getTempEvents() {
+async function getTempEvents(t0) {
   const found = new Map();
   const add = list => { for (const ev of list || []) if (ev && isTempEvent(ev) && !ev.closed) found.set(String(ev.id), ev); };
   const now = Date.now();
   const min = new Date(now - 2 * 86400000).toISOString();
   const max = new Date(now + 14 * 86400000).toISOString();
 
-  // 1) Every open event ending in the next two weeks (no gaps between pages).
-  const window = `${GAMMA}/events?closed=false&end_date_min=${min}&end_date_max=${max}`;
+  // 1) Every open event ending in the next two weeks, plus the weather tag (max ~20s).
+  const listDeadline = t0 + 20000;
   const [byDate, byTag] = await Promise.all([
-    pageAll(window),
-    pageAll(`${GAMMA}/events?closed=false&tag_slug=weather`, 20)
+    pageAll(`${GAMMA}/events?closed=false&end_date_min=${min}&end_date_max=${max}`, 40, listDeadline),
+    pageAll(`${GAMMA}/events?closed=false&tag_slug=weather`, 10, listDeadline)
   ]);
   add(byDate); add(byTag);
 
-  // 2) For every city we saw, look up the next few days directly by slug,
-  //    e.g. highest-temperature-in-toronto-on-november-9-2026
-  const cities = new Set();
+  // 2) For each city, look up today and the next 3 days directly by slug if they weren't found.
+  const cities = new Map(); // prefix -> slug style (with or without year)
+  const have = new Set();
   for (const ev of found.values()) {
-    const m = (ev.slug || "").match(/^(highest-temperature-in-.+?)-on-[a-z]+-\d{1,2}(?:-\d{4})?$/);
-    if (m) cities.add(m[1]);
+    have.add(ev.slug);
+    const m = (ev.slug || "").match(/^(highest-temperature-in-.+?)-on-[a-z]+-\d{1,2}(-\d{4})?$/);
+    if (m) cities.set(m[1], !!m[2]);
   }
-  const slugs = [];
-  for (const prefix of cities) for (let d = -1; d <= 5; d++) {
+  const missing = [];
+  for (const [prefix, withYear] of cities) for (let d = 0; d <= 3; d++) {
     const t = new Date(now + d * 86400000);
-    const md = `${MONTHS[t.getUTCMonth()]}-${t.getUTCDate()}`;
-    slugs.push(`${prefix}-on-${md}-${t.getUTCFullYear()}`, `${prefix}-on-${md}`);
+    const sl = `${prefix}-on-${MONTHS[t.getUTCMonth()]}-${t.getUTCDate()}${withYear ? "-" + t.getUTCFullYear() : ""}`;
+    if (!have.has(sl)) missing.push(sl);
   }
-  const have = new Set([...found.values()].map(e => e.slug));
-  const missing = slugs.filter(sl => !have.has(sl));
-  for (let i = 0; i < missing.length; i += 25) {
-    const batch = await Promise.all(missing.slice(i, i + 25).map(sl =>
+  const probes = missing.slice(0, 150);
+  for (let i = 0; i < probes.length && Date.now() < t0 + 35000; i += 50) {
+    const batch = await Promise.all(probes.slice(i, i + 50).map(sl =>
       getJSON(`${GAMMA}/events?slug=${encodeURIComponent(sl)}`).catch(() => [])));
     for (const r of batch) add(Array.isArray(r) ? r : [r]);
   }
@@ -193,8 +193,9 @@ export default async function handler(req, res) {
   const near = parseFloat((req.query && req.query.near) || "0") || 0;
   const hits = [], skipped = [], overview = [];
   let finished = 0;
+  const t0 = Date.now();
   try {
-    const events = await getTempEvents();
+    const events = await getTempEvents(t0);
     await Promise.all(events.map(async ev => {
       const code = findStation(ev);
       const st = code ? await lookupStation(code) : null;
@@ -236,7 +237,7 @@ export default async function handler(req, res) {
     const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
     hits.sort(byDate); overview.sort(byDate);
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, finished, hits, overview, skipped });
+    res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, finished, hits, overview, skipped, ms: Date.now() - t0 });
   } catch (e) {
     res.status(500).json({ error: String(e && e.message || e) });
   }
