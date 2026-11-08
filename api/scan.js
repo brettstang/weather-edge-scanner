@@ -38,6 +38,39 @@ const STATIONS = {
   NZWN: [-41.3272, 174.8053, "Wellington"],
   SAEZ: [-34.8222, -58.5358, "Buenos Aires Ezeiza"],
   LTAC: [40.1281, 32.9951, "Ankara Esenboga"],
+  EDDM: [48.3538, 11.7861, "Munich Airport"],
+  WSSS: [1.3644, 103.9915, "Singapore Changi"],
+  ZSPD: [31.1443, 121.8083, "Shanghai Pudong"],
+  ZBAA: [40.0799, 116.6031, "Beijing Capital"],
+  LEMD: [40.4983, -3.5676, "Madrid Barajas"],
+  LIMC: [45.6306, 8.7281, "Milan Malpensa"],
+  EPWA: [52.1657, 20.9671, "Warsaw Chopin"],
+  LLBG: [32.0114, 34.8867, "Tel Aviv Ben Gurion"],
+  MMMX: [19.4361, -99.0719, "Mexico City Intl"],
+  SBGR: [-23.4356, -46.4731, "Sao Paulo Guarulhos"],
+  VILK: [26.7606, 80.8893, "Lucknow Airport"],
+  VIDP: [28.5562, 77.1000, "Delhi Indira Gandhi"],
+  VABB: [19.0896, 72.8656, "Mumbai Airport"],
+  OMDB: [25.2532, 55.3657, "Dubai Intl"],
+  YSSY: [-33.9399, 151.1753, "Sydney Airport"],
+  CYVR: [49.1967, -123.1815, "Vancouver Intl"],
+  CYUL: [45.4706, -73.7408, "Montreal Trudeau"],
+  EHAM: [52.3105, 4.7683, "Amsterdam Schiphol"],
+  EDDB: [52.3667, 13.5033, "Berlin Brandenburg"],
+  LTFM: [41.2753, 28.7519, "Istanbul Airport"],
+  ZGSZ: [22.6393, 113.8107, "Shenzhen Bao'an"],
+  ZUUU: [30.5785, 103.9471, "Chengdu Shuangliu"],
+  ZHHH: [30.7838, 114.2081, "Wuhan Tianhe"],
+  ZUCK: [29.7192, 106.6417, "Chongqing Jiangbei"],
+  RCTP: [25.0797, 121.2342, "Taipei Taoyuan"],
+  KSAN: [32.7338, -117.1933, "San Diego Intl"],
+  KMSY: [29.9934, -90.2580, "New Orleans Intl"],
+  KOKC: [35.3931, -97.6007, "Oklahoma City Will Rogers"],
+  KSAT: [29.5337, -98.4698, "San Antonio Intl"],
+  KDTW: [42.2162, -83.3554, "Detroit Metro"],
+  KCLT: [35.2140, -80.9431, "Charlotte Douglas"],
+  KTPA: [27.9755, -82.5332, "Tampa Intl"],
+  KBNA: [36.1263, -86.6774, "Nashville Intl"],
   // Non-airport settlement sources
   HKO: [22.3022, 114.1742, "Hong Kong Observatory HQ, Tsim Sha Tsui"]
 };
@@ -47,23 +80,25 @@ const NAMED_SOURCES = [
   [/hong kong observatory/i, "HKO"]
 ];
 
-let airportCache = null;
-async function lookupStation(code) {
-  if (STATIONS[code]) return STATIONS[code];
-  try {
-    if (!airportCache) {
-      const csv = await (await fetch("https://davidmegginson.github.io/ourairports-data/airports.csv")).text();
-      airportCache = {};
+let airportDb = null; // one shared download per scan, never one per market
+function loadAirports() {
+  if (!airportDb) airportDb = fetch("https://davidmegginson.github.io/ourairports-data/airports.csv", { signal: AbortSignal.timeout(8000) })
+    .then(r => r.text())
+    .then(csv => {
+      const db = {};
       for (const line of csv.split("\n")) {
         const c = line.split(",");
         const ident = (c[1] || "").replace(/"/g, "");
-        if (ident.length === 4) airportCache[ident] = [parseFloat(c[4]), parseFloat(c[5]), (c[3] || "").replace(/"/g, "")];
+        if (ident.length === 4) db[ident] = [parseFloat(c[4]), parseFloat(c[5]), (c[3] || "").replace(/"/g, "")];
       }
-    }
-    return airportCache[code] || null;
-  } catch {
-    return null;
-  }
+      return db;
+    })
+    .catch(() => ({}));
+  return airportDb;
+}
+async function lookupStation(code) {
+  if (STATIONS[code]) return STATIONS[code];
+  return (await loadAirports())[code] || null;
 }
 
 async function getJSON(url) {
@@ -100,7 +135,7 @@ async function getTempEvents(t0) {
   const max = new Date(now + 14 * 86400000).toISOString();
 
   // 1) Every open event ending in the next two weeks, plus the weather tag (max ~20s).
-  const listDeadline = t0 + 20000;
+  const listDeadline = t0 + 12000;
   const [byDate, byTag] = await Promise.all([
     pageAll(`${GAMMA}/events?closed=false&end_date_min=${min}&end_date_max=${max}`, 40, listDeadline),
     pageAll(`${GAMMA}/events?closed=false&tag_slug=weather`, 10, listDeadline)
@@ -122,7 +157,7 @@ async function getTempEvents(t0) {
     if (!have.has(sl)) missing.push(sl);
   }
   const probes = missing.slice(0, 150);
-  for (let i = 0; i < probes.length && Date.now() < t0 + 35000; i += 50) {
+  for (let i = 0; i < probes.length && Date.now() < t0 + 20000; i += 50) {
     const batch = await Promise.all(probes.slice(i, i + 50).map(sl =>
       getJSON(`${GAMMA}/events?slug=${encodeURIComponent(sl)}`).catch(() => [])));
     for (const r of batch) add(Array.isArray(r) ? r : [r]);
@@ -196,7 +231,8 @@ export default async function handler(req, res) {
   const t0 = Date.now();
   try {
     const events = await getTempEvents(t0);
-    await Promise.all(events.map(async ev => {
+    let partial = false;
+    const work = Promise.all(events.map(async ev => {
       const code = findStation(ev);
       const st = code ? await lookupStation(code) : null;
       if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
@@ -234,10 +270,14 @@ export default async function handler(req, res) {
       if (isFinished) { finished++; return; }
       if (row.forecast != null) overview.push(row);
     }));
+    let timer;
+    const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
+    await Promise.race([work, stop]);
+    clearTimeout(timer);
     const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
     hits.sort(byDate); overview.sort(byDate);
     res.setHeader("Cache-Control", "no-store");
-    res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, finished, hits, overview, skipped, ms: Date.now() - t0 });
+    res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, finished, hits, overview, skipped, partial, ms: Date.now() - t0 });
   } catch (e) {
     res.status(500).json({ error: String(e && e.message || e) });
   }

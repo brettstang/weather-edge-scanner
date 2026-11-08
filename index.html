@@ -219,6 +219,7 @@ function render(data) {
       <div class="stat hit"><b>${hits.length}</b><span>Edge hits</span></div>
       <div class="stat near"><b>${near.length}</b><span>Near misses</span></div>
     </div>
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
     <div class="when">Updated ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })}</div>`;
 
   html += `<div class="section">Results</div>`;
