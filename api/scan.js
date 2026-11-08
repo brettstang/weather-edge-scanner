@@ -73,22 +73,60 @@ async function getJSON(url) {
 }
 
 const isTempEvent = ev => /highest temperature in/i.test(ev.title || "");
+const MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+
+// Page through a Gamma list endpoint 100 at a time with no gaps, in parallel waves.
+async function pageAll(base, maxPages = 60) {
+  const out = [];
+  for (let start = 0; start < maxPages; start += 10) {
+    const wave = await Promise.all(Array.from({ length: 10 }, (_, i) =>
+      getJSON(`${base}&limit=100&offset=${(start + i) * 100}`).catch(() => [])));
+    let done = false;
+    for (const page of wave) {
+      if (!Array.isArray(page) || page.length === 0) { done = true; continue; }
+      out.push(...page);
+      if (page.length < 100) done = true;
+    }
+    if (done) break;
+  }
+  return out;
+}
 
 async function getTempEvents() {
   const found = new Map();
-  // 1) Try the weather tag first (fast).
-  for (const tag of ["weather", "temperature", "daily-temperature"]) {
-    try {
-      const page = await getJSON(`${GAMMA}/events?active=true&closed=false&limit=500&tag_slug=${tag}`);
-      if (Array.isArray(page)) for (const ev of page) if (isTempEvent(ev)) found.set(ev.id, ev);
-    } catch {}
+  const add = list => { for (const ev of list || []) if (ev && isTempEvent(ev) && !ev.closed) found.set(String(ev.id), ev); };
+  const now = Date.now();
+  const min = new Date(now - 2 * 86400000).toISOString();
+  const max = new Date(now + 14 * 86400000).toISOString();
+
+  // 1) Every open event ending in the next two weeks (no gaps between pages).
+  const window = `${GAMMA}/events?closed=false&end_date_min=${min}&end_date_max=${max}`;
+  const [byDate, byTag] = await Promise.all([
+    pageAll(window),
+    pageAll(`${GAMMA}/events?closed=false&tag_slug=weather`, 20)
+  ]);
+  add(byDate); add(byTag);
+
+  // 2) For every city we saw, look up the next few days directly by slug,
+  //    e.g. highest-temperature-in-toronto-on-november-9-2026
+  const cities = new Set();
+  for (const ev of found.values()) {
+    const m = (ev.slug || "").match(/^(highest-temperature-in-.+?)-on-[a-z]+-\d{1,2}(?:-\d{4})?$/);
+    if (m) cities.add(m[1]);
   }
-  // 2) Also sweep all open events in parallel pages, in case tags change.
-  const offsets = Array.from({ length: 20 }, (_, i) => i * 500);
-  const pages = await Promise.all(offsets.map(o =>
-    getJSON(`${GAMMA}/events?active=true&closed=false&limit=500&offset=${o}`).catch(() => [])
-  ));
-  for (const page of pages) if (Array.isArray(page)) for (const ev of page) if (isTempEvent(ev)) found.set(ev.id, ev);
+  const slugs = [];
+  for (const prefix of cities) for (let d = -1; d <= 5; d++) {
+    const t = new Date(now + d * 86400000);
+    const md = `${MONTHS[t.getUTCMonth()]}-${t.getUTCDate()}`;
+    slugs.push(`${prefix}-on-${md}-${t.getUTCFullYear()}`, `${prefix}-on-${md}`);
+  }
+  const have = new Set([...found.values()].map(e => e.slug));
+  const missing = slugs.filter(sl => !have.has(sl));
+  for (let i = 0; i < missing.length; i += 25) {
+    const batch = await Promise.all(missing.slice(i, i + 25).map(sl =>
+      getJSON(`${GAMMA}/events?slug=${encodeURIComponent(sl)}`).catch(() => [])));
+    for (const r of batch) add(Array.isArray(r) ? r : [r]);
+  }
   return [...found.values()];
 }
 
