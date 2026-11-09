@@ -422,6 +422,50 @@ async function sunScan(events, t0, maxCloudLimit = SUN_MAX_CLOUD) {
   return { mode: "sun", rules: { maxCloud: maxCloudLimit }, hits, overview, skipped, finished, partial };
 }
 
+// ---------- Multi-model comparison (Open-Meteo, one request per model so one failure can't break the rest) ----------
+const MODELS = [
+  ["ecmwf_ifs025", "ECMWF (Europe)"],
+  ["gfs_seamless", "GFS (US)"],
+  ["gem_seamless", "GEM (Canada)"],
+  ["icon_seamless", "ICON (Germany)"],
+  ["ukmo_seamless", "UKMO (UK)"],
+  ["meteofrance_seamless", "Météo-France"],
+  ["jma_seamless", "JMA (Japan)"]
+];
+const modelCache = {};
+function modelHighs(lat, lon, unit) {
+  const key = `${lat},${lon},${unit}`;
+  if (!modelCache[key]) modelCache[key] = Promise.all(MODELS.map(async ([id, name]) => {
+    try {
+      const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&forecast_days=16&models=${id}`);
+      const k = Object.keys(d.daily || {}).find(x => x.startsWith("temperature_2m_max"));
+      return k ? { id, name, time: d.daily.time, max: d.daily[k] } : null;
+    } catch { return null; }
+  }));
+  return modelCache[key];
+}
+async function addModels(hit) {
+  const list = await modelHighs(hit.lat, hit.lon, hit.unit);
+  const models = [];
+  for (const m of list) {
+    if (!m) continue;
+    const i = m.time.indexOf(hit.date);
+    const v = i >= 0 ? m.max[i] : null;
+    if (v == null) continue;
+    const r = Math.round(v);
+    models.push({ name: m.name, value: Math.round(v * 10) / 10, inBucket: hit.side === "HIGH" ? r >= hit.threshold : r <= hit.threshold });
+  }
+  hit.models = models;
+  hit.agree = models.filter(m => m.inBucket).length;
+}
+
+// Settlement-source link (Weather Underground) from the market rules, if present
+function settlementLink(ev) {
+  const text = [ev.resolutionSource, ev.description, ...(ev.markets || []).flatMap(m => [m.resolutionSource, m.description])].filter(Boolean).join(" ");
+  const m = text.match(/https?:\/\/(?:www\.)?wunderground\.com\/[^\s"')<]+/);
+  return m ? m[0].replace(/[.,;]+$/, "") : null;
+}
+
 // ---------- Edge temperature scan ----------
 export async function tempScan(events, t0, near = 0) {
   const hits = [], skipped = [], overview = [];
@@ -457,7 +501,7 @@ export async function tempScan(events, t0, near = 0) {
           threshold: b.value, unit: b.unit, forecast: fc, rounded: r, past,
           yesPct, noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
           station: code, stationName: st[2], lat: st[0], lon: st[1],
-          url: row.url, slug: ev.slug, nearMiss: past < 0
+          url: row.url, slug: ev.slug, nearMiss: past < 0, settle: settlementLink(ev)
         };
         hits.push(hit);
         if (!row.hit || (row.hit.nearMiss && !hit.nearMiss)) row.hit = hit;
@@ -470,6 +514,13 @@ export async function tempScan(events, t0, near = 0) {
   const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
   await Promise.race([work, stop]);
   clearTimeout(timer);
+  // Compare each hit against several independent models (max ~12 s)
+  let t2;
+  await Promise.race([
+    Promise.all(hits.map(h => addModels(h).catch(() => {}))),
+    new Promise(r => { t2 = setTimeout(r, 12000); })
+  ]);
+  clearTimeout(t2);
   const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
   hits.sort(byDate); overview.sort(byDate);
   return { mode: "temp", hits, overview, skipped, finished, partial };

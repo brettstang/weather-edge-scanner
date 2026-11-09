@@ -90,6 +90,18 @@
   .pill.near { background:rgba(255,209,102,.16); color:var(--amber); }
   .pill.na { background:rgba(255,255,255,.1); color:var(--muted); }
   .xr.pass { border-color:rgba(62,230,160,.35); }
+  .models { margin:4px 0 12px; border:1px solid var(--stroke); border-radius:14px; overflow:hidden; }
+  .models .mh { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; background:rgba(255,255,255,.06); font-weight:700; font-size:14px; }
+  .models .mh .agree { font-size:12px; font-weight:800; padding:3px 9px; border-radius:999px; }
+  .agree.strong { background:rgba(62,230,160,.16); color:var(--green); }
+  .agree.mixed { background:rgba(255,209,102,.16); color:var(--amber); }
+  .agree.weak { background:rgba(255,94,98,.16); color:#ff9b9e; }
+  .models .mr { display:flex; justify-content:space-between; padding:7px 12px; font-size:14px; border-top:1px solid var(--stroke); }
+  .models .mr span:first-child { color:var(--muted); }
+  .models .mr.in b { color:var(--green); } .models .mr.out b { color:#ff9b9e; }
+  .links { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
+  .links a { flex:1 1 auto; text-align:center; text-decoration:none; color:#fff; font-size:13px; font-weight:600; padding:9px 10px;
+             border-radius:12px; background:rgba(255,255,255,.08); border:1px solid var(--stroke); white-space:nowrap; }
   .cap { font-size:12px; color:var(--faint); margin-top:12px; }
   details.hours { margin:10px 0 2px; }
   details.hours summary { background:rgba(255,255,255,.06); padding:10px 14px; border-radius:12px; font-size:14px; }
@@ -282,6 +294,24 @@ function bar(low, high, fc, unit) {
   </div>`;
 }
 
+function modelBox(h) {
+  if (!h.models || !h.models.length) return "";
+  const n = h.models.length, a = h.agree, ratio = a / n;
+  const cls = ratio >= 0.75 ? "strong" : ratio >= 0.5 ? "mixed" : "weak";
+  return `<div class="models">
+    <div class="mh"><span>Model check</span><span class="agree ${cls}">${a} of ${n} agree</span></div>
+    ${h.models.map(m => `<div class="mr ${m.inBucket ? "in" : "out"}"><span>${esc(m.name)}</span><b>${m.value}°${h.unit} ${m.inBucket ? "✓" : "✗"}</b></div>`).join("")}
+  </div>`;
+}
+function linkRow(h) {
+  const windy = h.lat != null ? `https://www.windy.com/?${h.lat},${h.lon},10` : null;
+  return `<div class="links">
+    <a href="https://apps.apple.com/app/id1155613071" target="_blank" rel="noopener">📡 SkyTracker</a>
+    ${windy ? `<a href="${windy}" target="_blank" rel="noopener">🌬️ Windy</a>` : ""}
+    ${h.settle ? `<a href="${esc(h.settle)}" target="_blank" rel="noopener">📊 Settlement data</a>` : ""}
+  </div>`;
+}
+
 function hitCard(h, row) {
   const sign = h.past > 0 ? `${h.past}° past the line` : h.past === 0 ? "right on the line" : `${Math.abs(h.past)}° short`;
   const badge = h.nearMiss ? `<span class="badge nearb">NEAR · ${h.side}</span>`
@@ -298,6 +328,8 @@ function hitCard(h, row) {
       <div class="odds"><small>Market says</small><b>${pct(h.yesPct)}</b><div class="no">No ${pct(h.noPct)}</div></div>
     </div>
     ${bar(low, high, h.forecast, h.unit)}
+    ${modelBox(h)}
+    ${linkRow(h)}
     ${xbtn(h.slug, "temp")}
     <div class="meta">
       <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">Rounds to ${h.rounded}°, ${sign}</span></div>

@@ -35,7 +35,7 @@ export default async function handler(req, res) {
       }
       if (!fresh.length) continue;
       const fmtDay = d => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
-      const line = h => `${h.nearMiss ? "🟡" : "🟢"} ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit} → ${h.bucket} (${h.yesPct ?? "?"}%)`;
+      const line = h => `${h.nearMiss ? "🟡" : "🟢"} ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit} → ${h.bucket} (${h.yesPct ?? "?"}%)${h.models && h.models.length ? ` · ${h.agree}/${h.models.length} models` : ""}`;
       const title = fresh.length === 1
         ? `🌡️ Edge hit: ${fresh[0].city}, ${fmtDay(fresh[0].date)}`
         : `🌡️ ${fresh.length} new Edge temp hits`;
