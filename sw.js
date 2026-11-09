@@ -1,5 +1,5 @@
 // Caches the app shell so it opens instantly, and shows auto-scan notifications.
-const CACHE = "weather-scanner-v4";
+const CACHE = "weather-scanner-v5";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon.png"];
 self.addEventListener("install", e => { self.skipWaiting(); e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); });
 self.addEventListener("activate", e => e.waitUntil(
@@ -18,7 +18,7 @@ self.addEventListener("push", e => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch { d = { title: "Weather Scanner", body: e.data && e.data.text() }; }
   e.waitUntil(self.registration.showNotification(d.title || "Weather Scanner", {
-    body: d.body || "", tag: d.tag, icon: "/icon.png", badge: "/icon.png", data: { url: d.url || "/" }
+    body: d.body || "", tag: d.tag, renotify: !!d.tag, icon: "/icon.png", badge: "/icon.png", data: { url: d.url || "/" }
   }));
 });
 self.addEventListener("notificationclick", e => {

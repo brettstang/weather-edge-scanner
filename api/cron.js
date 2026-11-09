@@ -41,7 +41,7 @@ export default async function handler(req, res) {
         : `🌡️ ${fresh.length} new Edge temp hits`;
       const body = fresh.slice(0, 4).map(line).join("\n") + (fresh.length > 4 ? `\n+${fresh.length - 4} more` : "");
       try {
-        const status = await sendPush(s.subscription, { title, body, url: "/?scan=temp", tag: "edge-temp" });
+        const status = await sendPush(s.subscription, { title, body, url: "/?scan=temp", tag: "edge-temp-" + Date.now() });
         if (status === 404 || status === 410) { await redis("HDEL", "subs", s.id); removed++; }
         else if (status < 300) sent++;
       } catch {}
