@@ -6,11 +6,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Edge Scan">
+<meta name="apple-mobile-web-app-title" content="Weather Scanner">
 <meta name="theme-color" content="#0b1026">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon.png">
-<title>Edge Scan</title>
+<title>Weather Scanner</title>
 <style>
   :root {
     --bg1:#0b1026; --bg2:#1b1f4a; --bg3:#2a1d4f;
@@ -37,12 +37,13 @@
   .brand { display:flex; align-items:center; gap:12px; }
   .logo { width:42px; height:42px; border-radius:12px; background:linear-gradient(135deg,var(--cold-2),#8a5cff 55%,var(--hot-2));
           display:grid; place-items:center; box-shadow:0 6px 20px rgba(120,90,255,.35); font-size:22px; }
-  h1 { font-size:28px; font-weight:800; letter-spacing:-.5px; margin:0; }
+  h1 { font-size:24px; font-weight:800; letter-spacing:-.5px; margin:0; white-space:nowrap; }
   .sub { color:var(--muted); font-size:13px; margin-top:1px; }
   .share { flex:none; display:flex; align-items:center; gap:6px; border:1px solid var(--stroke); background:var(--glass);
            color:var(--text); font:600 14px -apple-system, system-ui, sans-serif; padding:9px 14px; border-radius:999px; cursor:pointer;
            -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); }
   .share:active { transform:scale(.96); }
+  @media (max-width: 420px) { .share-lbl { display:none; } .share { padding:11px; } .share svg { width:18px; height:18px; } }
   .share svg { width:16px; height:16px; }
   .toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 24px); transform:translate(-50%, 20px); opacity:0;
            background:rgba(20,22,40,.92); border:1px solid var(--stroke); color:var(--text); padding:12px 18px; border-radius:999px;
@@ -204,13 +205,13 @@
     <div class="brand">
       <div class="logo">🌡️</div>
       <div>
-        <h1>Edge Scan</h1>
+        <h1>Weather Scanner</h1>
         <div class="sub">Polymarket vs Open-Meteo</div>
       </div>
     </div>
     <button class="share" id="share" aria-label="Share this app">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>
-      Share
+      <span class="share-lbl">Share</span>
     </button>
   </header>
   <div class="toast" id="toast"></div>
@@ -510,9 +511,9 @@ function toast(msg) {
 }
 $("share").onclick = async () => {
   const url = location.origin + "/";
-  const text = "Edge Scan: compares Polymarket daily-high temperature markets with Open-Meteo forecasts. Open in Safari, then Share → Add to Home Screen.";
+  const text = "Weather Scanner: compares Polymarket weather markets with Open-Meteo forecasts. Open in Safari, then Share → Add to Home Screen.";
   if (navigator.share) {
-    try { await navigator.share({ title: "Edge Scan", text, url }); return; }
+    try { await navigator.share({ title: "Weather Scanner", text, url }); return; }
     catch (e) { if (e && e.name === "AbortError") return; }
   }
   try { await navigator.clipboard.writeText(url); toast("Link copied"); }

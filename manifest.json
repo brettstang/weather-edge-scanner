@@ -1,6 +1,6 @@
 {
-  "name": "Weather Edge Scanner",
-  "short_name": "Edge Scan",
+  "name": "Weather Scanner",
+  "short_name": "Weather Scanner",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0b1026",

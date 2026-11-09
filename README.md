@@ -1,4 +1,4 @@
-# Weather Edge Scanner
+# Weather Scanner
 
 iPhone home-screen web app. Tap **Scan** to find Polymarket daily-high temperature markets where the Open-Meteo forecast (at the market's settlement airport) lands in the "or below" / "or higher" edge bucket, with the market's Yes/No percentage.
 
