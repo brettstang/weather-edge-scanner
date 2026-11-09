@@ -72,6 +72,16 @@
   .badge.SUN { background:rgba(255,200,80,.16); color:#ffd27a; }
   .clouds { display:grid; grid-template-columns:repeat(24,1fr); align-items:end; gap:2px; height:32px; margin:6px 0 4px; }
   .cap { font-size:12px; color:var(--faint); margin-top:12px; }
+  details.hours { margin:10px 0 2px; }
+  details.hours summary { background:rgba(255,255,255,.06); padding:10px 14px; border-radius:12px; font-size:14px; }
+  details.hours summary::after { font-size:18px; }
+  .hgrid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:10px; }
+  .hgrid div { border-radius:10px; padding:7px 4px; text-align:center; background:rgba(255,255,255,.06); line-height:1.25; }
+  .hgrid div small { display:block; font-size:11px; color:var(--muted); }
+  .hgrid div b { font-size:15px; }
+  .hgrid div.sunny { background:rgba(255,200,80,.18); } .hgrid div.sunny b { color:#ffd27a; }
+  .hgrid div.cloudy b { color:#e6e9ff; }
+  .hgrid div.night { opacity:.45; }
   .clouds i { border-radius:3px 3px 1px 1px; min-height:4px; background:rgba(255,255,255,.55); }
   .clouds i.sunny { background:linear-gradient(#ffd86b,#ff9f1c); }
   .clouds i.dark { background:rgba(255,255,255,.08); }
@@ -416,6 +426,15 @@ function cloudBars(clouds, daylight, limit = 10) {
   }).join("")}</div>`;
 }
 
+// Hour-by-hour cloud cover, tap to expand. Night hours are dimmed; hours at/under the limit are gold.
+function hourGrid(clouds, daylight, lim, open = false) {
+  const lbl = i => i === 0 ? "12am" : i < 12 ? i + "am" : i === 12 ? "12pm" : (i - 12) + "pm";
+  return `<details class="hours"${open ? " open" : ""}><summary>Hour by hour cloud cover</summary><div class="hgrid">${clouds.map((c, i) => {
+    const cls = !daylight[i] ? "night" : c != null && c <= lim ? "sunny" : "cloudy";
+    return `<div class="${cls}"><small>${lbl(i)}${!daylight[i] ? " 🌙" : ""}</small><b>${c == null ? "–" : c + "%"}</b></div>`;
+  }).join("")}</div></details>`;
+}
+
 function renderSun(data) {
   const ov = data.overview || [];
   const lim = data.rules?.maxCloud ?? 10;
@@ -441,6 +460,7 @@ function renderSun(data) {
     <div class="cap">Cloud cover by hour · gold = sunny hour</div>
     ${cloudBars(h.clouds, h.daylight, lim)}
     <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
+    ${hourGrid(h.clouds, h.daylight, lim)}
     <div class="meta">
       <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">${h.leading ? `Market favours ${esc(h.leading.label)} at ${pct(h.leading.yesPct)}` : ""}</span></div>
       <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
@@ -451,6 +471,7 @@ function renderSun(data) {
       <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
       ${cloudBars(o.clouds, o.daylight, lim)}
       <div class="edges" style="margin-top:4px !important"><span>Max cloud ${o.maxCloud}% · avg ${o.avgCloud}%</span><span style="color:${o.clear ? "#ffd27a" : "var(--muted)"}">${o.dayRain > 0 ? `${o.dayRain} mm rain` : `${o.sunPct ?? "?"}% sunny`}</span></div>
+      ${hourGrid(o.clouds, o.daylight, lim)}
     </div>`).join("")}</details>`;
   if (data.skipped.length) html += `<details style="margin-top:10px"><summary>Skipped (${data.skipped.length})</summary>${data.skipped.map(s =>
     `<div class="skip">${esc(s.title)} – ${esc(s.reason)}</div>`).join("")}</details>`;
