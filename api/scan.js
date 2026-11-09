@@ -556,6 +556,21 @@ async function checkOne(slug, near, cloud) {
   return { slug, checks: out };
 }
 
+// ---------- Detail: full card info for any one market (hit or not) ----------
+async function detailOne(slug, near) {
+  const found = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`);
+  const ev = Array.isArray(found) ? found[0] : found;
+  if (!ev) throw new Error("Market not found on Polymarket");
+  const t = await tempScan([ev], Date.now(), 999); // every edge bucket, with model check
+  const row = t.overview[0];
+  if (!row || !t.hits.length) throw new Error("No forecast available for this market");
+  // Show the edge the forecast is closest to (or already inside)
+  const h = t.hits.reduce((a, b) => (b.past > a.past ? b : a));
+  h.nearMiss = h.past < 0;
+  h.status = h.past >= 0 ? "hit" : h.past >= -near && near > 0 ? "near" : "none";
+  return { hit: h, row };
+}
+
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
 
 export default async function handler(req, res) {
@@ -566,6 +581,10 @@ export default async function handler(req, res) {
   const cloud = Number.isFinite(cloudN) ? cloudN : SUN_MAX_CLOUD;
   const t0 = Date.now();
   try {
+    if (mode === "detail") {
+      if (!q.slug) return send(res, 400, { error: "Missing market" });
+      return send(res, 200, await detailOne(String(q.slug), near));
+    }
     if (mode === "check") {
       if (!q.slug) return send(res, 400, { error: "Missing market" });
       return send(res, 200, await checkOne(String(q.slug), near, cloud));

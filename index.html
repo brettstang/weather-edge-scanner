@@ -102,6 +102,12 @@
   .links { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
   .links a { flex:1 1 auto; text-align:center; text-decoration:none; color:#fff; font-size:13px; font-weight:600; padding:9px 10px;
              border-radius:12px; background:rgba(255,255,255,.08); border:1px solid var(--stroke); white-space:nowrap; }
+  .row.tap { cursor:pointer; }
+  .row.tap .chev { font-style:normal; display:inline-block; margin-left:6px; font-size:18px; color:var(--muted); transition:transform .2s; }
+  .row.tap.open .chev { transform:rotate(90deg); }
+  .row .detail { margin:6px -4px 12px; cursor:default; }
+  .row .detail .card { margin:0; }
+  .row .detail .loading { text-align:center; color:var(--muted); padding:16px; font-size:14px; }
   .cap { font-size:12px; color:var(--faint); margin-top:12px; }
   details.hours { margin:10px 0 2px; }
   details.hours summary { background:rgba(255,255,255,.06); padding:10px 14px; border-radius:12px; font-size:14px; }
@@ -313,7 +319,8 @@ function linkRow(h) {
 
 function hitCard(h, row) {
   const sign = h.past > 0 ? `${h.past}° past the line` : h.past === 0 ? "right on the line" : `${Math.abs(h.past)}° short`;
-  const badge = h.nearMiss ? `<span class="badge nearb">NEAR · ${h.side}</span>`
+  const badge = h.status === "none" ? `<span class="badge nearb" style="background:rgba(255,255,255,.1);color:var(--muted)">NO HIT · ${Math.abs(h.past)}° FROM ${h.side}</span>`
+              : h.nearMiss ? `<span class="badge nearb">NEAR · ${h.side}</span>`
                            : `<span class="badge ${h.side}">${h.side === "LOW" ? "❄︎ LOW EDGE" : "🔥 HIGH EDGE"}</span>`;
   const low = row?.low?.threshold ?? (h.side === "LOW" ? h.threshold : null);
   const high = row?.high?.threshold ?? (h.side === "HIGH" ? h.threshold : null);
@@ -360,8 +367,8 @@ function render(data) {
 
   if (overview.length) {
     html += `<div class="section">Every market</div><details><summary>All markets (${overview.length})</summary>${overview.map(o => `
-      <div class="row">
-        <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      <div class="row tap" data-slug="${esc(o.slug || "")}">
+        <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)} <em class="chev">›</em></span></div>
         ${bar(o.low?.threshold ?? null, o.high?.threshold ?? null, o.forecast, o.unit)}
         <div class="edges">
           <span style="color:var(--cold)">${o.low ? `≤${o.low.threshold}° · ${pct(o.low.yesPct)}` : "–"}</span>
@@ -539,6 +546,31 @@ function renderSun(data) {
     `<div class="skip">${esc(s.title)} – ${esc(s.reason)}</div>`).join("")}</details>`;
   $("out").innerHTML = html;
 }
+
+// ---------- Tap an "All markets" row to open its full card ----------
+document.addEventListener("click", async e => {
+  const row = e.target.closest(".row.tap");
+  if (!row || e.target.closest(".detail")) return;
+  const slug = row.dataset.slug;
+  if (!slug) return;
+  const open = row.querySelector(".detail");
+  if (open) { open.remove(); row.classList.remove("open"); return; }
+  row.classList.add("open");
+  const box = document.createElement("div");
+  box.className = "detail";
+  box.innerHTML = `<div class="loading"><span class="spinner" style="display:inline-block;vertical-align:middle"></span> Loading details…</div>`;
+  row.appendChild(box);
+  try {
+    const near = $("near").checked ? 1 : 0;
+    const r = await fetch(`/api/scan?mode=detail&slug=${encodeURIComponent(slug)}&near=${near}&t=${Date.now()}`);
+    const body = await r.text();
+    let data; try { data = JSON.parse(body); } catch { throw new Error(`Server returned ${r.status}`); }
+    if (data.error) throw new Error(data.error);
+    box.innerHTML = hitCard(data.hit, data.row);
+  } catch (err) {
+    box.innerHTML = `<div class="error">Couldn't load details: ${esc(err.message)}</div>`;
+  }
+});
 
 // ---------- Cross-check one hit against the other scans ----------
 const SCANS = { temp: ["🌡️", "Edge temp"], rain: ["🌧️", "Steady rain"], night: ["🌙", "Night high"], sun: ["☀️", "Sunny day"] };
