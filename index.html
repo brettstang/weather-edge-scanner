@@ -306,7 +306,6 @@ function modelBox(h) {
 function linkRow(h) {
   const windy = h.lat != null ? `https://www.windy.com/?${h.lat},${h.lon},10` : null;
   return `<div class="links">
-    <a href="https://apps.apple.com/app/id1155613071" target="_blank" rel="noopener">📡 SkyTracker</a>
     ${windy ? `<a href="${windy}" target="_blank" rel="noopener">🌬️ Windy</a>` : ""}
     ${h.settle ? `<a href="${esc(h.settle)}" target="_blank" rel="noopener">📊 Settlement data</a>` : ""}
   </div>`;
