@@ -61,8 +61,19 @@
   }
   .scan:active { transform:scale(.98); }
   .scan:disabled { filter:saturate(.5) brightness(.85); }
-  .btns { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  .btns .scan { font-size:17px; padding:17px 10px; }
+  .btns { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .btns .scan { flex-direction:column; gap:6px; font-size:14px; padding:14px 6px 13px; border-radius:18px; }
+  .btns .scan .ico { font-size:24px; line-height:1; }
+  .btns .scan.busy .ico { display:none; }
+  .btns .scan .spinner { width:24px; height:24px; }
+  .scan.night { background:linear-gradient(135deg,#3b2a8f 0%,#6a3df0 55%,#c86dd7 100%); box-shadow:0 10px 30px rgba(106,61,240,.4), inset 0 1px 0 rgba(255,255,255,.25); }
+  .card.NIGHT::before { background:linear-gradient(#c86dd7,#6a3df0); }
+  .badge.NIGHT { background:rgba(160,120,255,.18); color:#cdb6ff; }
+  .spark { display:grid; grid-template-columns:repeat(24,1fr); align-items:end; gap:2px; height:64px; margin:14px 0 4px; }
+  .spark i { border-radius:3px 3px 1px 1px; background:rgba(255,255,255,.22); min-height:3px; }
+  .spark i.nt { background:rgba(160,120,255,.55); }
+  .spark i.pk { background:linear-gradient(#ffd166,#ff9f43); box-shadow:0 0 10px rgba(255,180,80,.6); }
+  .row .spark { height:34px; margin:10px 0 4px; }
   .scan.rain { background:linear-gradient(135deg,#1fa2ff 0%,#12d8fa 55%,#3ee6a0 100%); box-shadow:0 10px 30px rgba(18,180,250,.35), inset 0 1px 0 rgba(255,255,255,.25); }
   .card.RAIN::before { background:linear-gradient(#12d8fa,#1fa2ff); }
   .badge.RAIN { background:rgba(18,216,250,.15); color:#7fe7ff; }
@@ -185,12 +196,13 @@
       <span class="switch"><input type="checkbox" id="near"><i></i></span>
     </label>
     <div class="btns">
-      <button class="scan" id="scan" data-mode="temp"><span class="spinner"></span><span class="lbl">🌡️ Temp scan</span></button>
-      <button class="scan rain" id="rainScan" data-mode="rain"><span class="spinner"></span><span class="lbl">🌧️ Rain scan</span></button>
+      <button class="scan" id="scan" data-mode="temp"><span class="ico">🌡️</span><span class="spinner"></span><span class="lbl">Edge temp</span></button>
+      <button class="scan rain" id="rainScan" data-mode="rain"><span class="ico">🌧️</span><span class="spinner"></span><span class="lbl">Steady rain</span></button>
+      <button class="scan night" id="nightScan" data-mode="night"><span class="ico">🌙</span><span class="spinner"></span><span class="lbl">Night high</span></button>
     </div>
   </div>
 
-  <div id="out"><p class="hint"><b>Temp scan</b>: forecast highs that land in an edge bucket.<br><b>Rain scan</b>: 3+ hours in a row with ≥50% chance and ≥0.1 mm.<br>Both use every city and day open on Polymarket.</p></div>
+  <div id="out"><p class="hint"><b>Edge temp</b>: forecast highs that land in an edge bucket.<br><b>Steady rain</b>: 3+ hours in a row with ≥50% chance and ≥0.1 mm.<br><b>Night high</b>: the day's high comes between 9pm and 5am.<br>All scans use every city and day open on Polymarket.</p></div>
 </div>
 
 <script>
@@ -325,6 +337,56 @@ function renderRain(data) {
   $("out").innerHTML = html;
 }
 
+function spark(temps, peakHour) {
+  const vals = temps.filter(v => v != null);
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = Math.max(1, hi - lo);
+  return `<div class="spark">${temps.map((v, i) => {
+    const night = i >= 21 || i <= 5;
+    const hgt = v == null ? 0 : 12 + ((v - lo) / span) * 88;
+    return `<i class="${i === peakHour ? "pk" : night ? "nt" : ""}" style="height:${hgt}%"></i>`;
+  }).join("")}</div>`;
+}
+
+function renderNight(data) {
+  const ov = data.overview || [];
+  const fmt = v => Math.round(v * 10) / 10;
+  let html = `
+    <div class="stats">
+      <div class="stat"><b>${ov.length}</b><span>Days checked</span></div>
+      <div class="stat hit"><b>${data.hits.length}</b><span>Night highs</span></div>
+      <div class="stat near"><b>${ov.filter(o => !o.night && o.margin > -2).length}</b><span>Within 2°</span></div>
+    </div>
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    <div class="when">Night high scan · ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })} · times are local to each city</div>
+    <div class="section">High comes at night (9pm–5am)</div>`;
+  if (!data.hits.length) html += `<div class="card empty"><div>🌤️</div>Every open day peaks in the daytime right now.</div>`;
+  html += data.hits.map(h => `<div class="card NIGHT">
+    <div class="top">
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div></div>
+      <span class="badge NIGHT">🌙 NIGHT HIGH</span>
+    </div>
+    <div class="nums">
+      <div class="temp"><small>Peak at ${esc(h.peakTime)}</small>${fmt(h.peak)}°<span style="font-size:22px">${h.unit}</span></div>
+      <div class="odds"><small>Daytime max ${fmt(h.dayMax)}° at ${esc(h.dayTime)}</small><b>+${h.margin}°</b><div class="no">warmer at night</div></div>
+    </div>
+    ${spark(h.temps, +h.peakTime.slice(0, 2))}
+    <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
+    <div class="meta">
+      <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">${h.leading ? `Market favours ${esc(h.leading.label)} at ${pct(h.leading.yesPct)}` : ""}</span></div>
+      <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
+    </div>
+  </div>`).join("");
+  if (ov.length) html += `<div class="section">Every day</div><details><summary>All days (${ov.length})</summary>${ov.map(o => `
+    <div class="row">
+      <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      ${spark(o.temps, +o.peakTime.slice(0, 2))}
+      <div class="edges" style="margin-top:4px !important"><span>Peak ${fmt(o.peak)}°${o.unit} at ${esc(o.peakTime)}</span><span style="color:${o.night ? "#cdb6ff" : "var(--muted)"}">${o.margin > 0 ? "+" : ""}${o.margin}° night vs day</span></div>
+    </div>`).join("")}</details>`;
+  if (data.skipped.length) html += `<details style="margin-top:10px"><summary>Skipped (${data.skipped.length})</summary>${data.skipped.map(s =>
+    `<div class="skip">${esc(s.title)} – ${esc(s.reason)}</div>`).join("")}</details>`;
+  $("out").innerHTML = html;
+}
+
 async function runScan(btn) {
   const mode = btn.dataset.mode;
   document.querySelectorAll(".scan").forEach(b => b.disabled = true);
@@ -339,7 +401,7 @@ async function runScan(btn) {
     try { data = JSON.parse(body); }
     catch { throw new Error(`Server returned ${r.status}${r.status === 504 ? " (scan timed out)" : ""}: ${body.slice(0, 120)}`); }
     if (data.error) throw new Error(data.error);
-    mode === "rain" ? renderRain(data) : render(data);
+    mode === "rain" ? renderRain(data) : mode === "night" ? renderNight(data) : render(data);
   } catch (e) {
     $("out").innerHTML = `<div class="error">Scan failed: ${esc(e.message)}</div>`;
   }
@@ -348,6 +410,7 @@ async function runScan(btn) {
 }
 $("scan").onclick = () => runScan($("scan"));
 $("rainScan").onclick = () => runScan($("rainScan"));
+$("nightScan").onclick = () => runScan($("nightScan"));
 
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("show");

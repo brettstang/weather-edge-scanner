@@ -292,7 +292,87 @@ async function rainScan(events, t0) {
   return { mode: "rain", rules: { prob: RAIN_PROB, mm: RAIN_MM, streak: RAIN_STREAK }, hits, overview, skipped, finished, partial };
 }
 
+// ---------- Night high scan ----------
+// Flags days where the forecast daily high happens at night (21:00–05:00 local),
+// i.e. the warmest night hour is warmer than every daytime hour (06:00–20:00).
+const isNight = h => h >= 21 || h <= 5;
+const hourlyTempCache = {};
+async function hourlyTemps(lat, lon, unit) {
+  const key = `${lat},${lon},${unit}`;
+  if (!hourlyTempCache[key]) hourlyTempCache[key] = getJSON(
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&past_days=1&forecast_days=16`
+  );
+  return hourlyTempCache[key];
+}
+
+function leadingBucket(ev) {
+  let best = null;
+  for (const m of ev.markets || []) {
+    if (m.closed) continue;
+    const p = yesPrice(m);
+    if (p != null && (!best || p > best.p)) best = { p, label: m.groupItemTitle || m.question || "" };
+  }
+  return best ? { label: best.label, yesPct: Math.round(best.p * 1000) / 10 } : null;
+}
+
+async function nightScan(events, t0) {
+  const hits = [], overview = [], skipped = [];
+  let finished = 0, partial = false;
+  const work = Promise.all(events.map(async ev => { try {
+    const code = findStation(ev);
+    const st = code ? await lookupStation(code) : null;
+    if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
+    const date = parseDate(ev);
+    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    // Use the market's own unit
+    let unit = "F";
+    for (const m of ev.markets || []) { const lbl = m.groupItemTitle || m.question || ""; if (/°\s*C|celsius/i.test(lbl)) { unit = "C"; break; } if (/°\s*F/i.test(lbl)) break; }
+    let data;
+    try { data = await hourlyTemps(st[0], st[1], unit); } catch { return; }
+    const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
+    if (date < localToday) { finished++; return; }
+    const h = data.hourly; if (!h) return;
+    const temps = new Array(24).fill(null);
+    for (let i = 0; i < h.time.length; i++) if (h.time[i].startsWith(date)) temps[+h.time[i].slice(11, 13)] = h.temperature_2m[i];
+    if (temps.every(v => v == null)) return;
+    let peakHour = -1, peak = -Infinity, dayMax = -Infinity, dayHour = -1, nightMax = -Infinity;
+    temps.forEach((v, hr) => {
+      if (v == null) return;
+      if (v > peak) { peak = v; peakHour = hr; }
+      if (isNight(hr)) nightMax = Math.max(nightMax, v);
+      else if (v > dayMax) { dayMax = v; dayHour = hr; }
+    });
+    const margin = Math.round((nightMax - dayMax) * 10) / 10;
+    const row = {
+      city, date, unit, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`,
+      peak, peakTime: String(peakHour).padStart(2, "0") + ":00", dayMax, dayTime: String(dayHour).padStart(2, "0") + ":00",
+      margin, temps, leading: leadingBucket(ev), night: nightMax > dayMax
+    };
+    overview.push(row);
+    if (row.night) hits.push(row);
+  } catch (e) { skipped.push({ title: ev.title, reason: "Error: " + (e && e.message || e) }); } }));
+  let timer;
+  const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
+  await Promise.race([work, stop]);
+  clearTimeout(timer);
+  // Biggest night-over-day margin first
+  const byMargin = (a, b) => b.margin - a.margin || a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
+  hits.sort(byMargin); overview.sort(byMargin);
+  return { mode: "night", hits, overview, skipped, finished, partial };
+}
+
 export default async function handler(req, res) {
+  if ((req.query && req.query.mode) === "night") {
+    const t0 = Date.now();
+    try {
+      const events = await getTempEvents(t0);
+      const out = await nightScan(events, t0);
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
+    } catch (e) {
+      return res.status(500).json({ error: String(e && e.message || e) });
+    }
+  }
   if ((req.query && req.query.mode) === "rain") {
     const t0 = Date.now();
     try {
