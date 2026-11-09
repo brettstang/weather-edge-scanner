@@ -136,6 +136,9 @@
   .slider input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:26px; height:26px; border-radius:50%; background:#fff;
     box-shadow:0 2px 8px rgba(0,0,0,.35); }
   .slider b { color:#ffd27a; }
+  .autobar[hidden] { display:none; }
+  .autobar { display:flex; justify-content:space-between; align-items:center; margin:-6px 4px 0; font-size:12px; color:var(--faint); }
+  .autobar button { border:0; background:none; color:#7fb2ff; font:600 13px -apple-system, system-ui, sans-serif; padding:4px 0; cursor:pointer; }
   .switch { position:relative; width:51px; height:31px; flex:none; }
   .switch input { opacity:0; width:0; height:0; }
   .switch i { position:absolute; inset:0; border-radius:31px; background:rgba(255,255,255,.18); transition:.25s; }
@@ -239,6 +242,11 @@
       <div><span>Include near misses</span><small>Temperature scan: forecast within 1° of an edge</small></div>
       <span class="switch"><input type="checkbox" id="near"><i></i></span>
     </label>
+    <label class="toggle auto">
+      <div><span>🔔 Auto-scan Edge temp</span><small id="autoNote">Every 30 min · notifies this phone about new hits</small></div>
+      <span class="switch"><input type="checkbox" id="auto"><i></i></span>
+    </label>
+    <div class="autobar" id="autobar" hidden><span id="autoLast"></span><button id="autoTest">Send test</button></div>
     <div class="toggle slider">
       <div style="flex:1"><span>Sunny day cloud limit: <b id="cloudVal">10%</b></span><small>Every daylight hour must have this much cloud or less</small>
         <input type="range" id="cloud" min="0" max="50" step="5" value="10"></div>
@@ -554,6 +562,87 @@ async function runScan(btn) {
   document.querySelectorAll(".scan").forEach(b => b.disabled = false);
   btn.classList.remove("busy"); lbl.textContent = orig;
 }
+// ---------- Auto-scan notifications ----------
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const pushOK = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const keyBytes = k => { const b = atob(k.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((k.length + 3) % 4)); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+const postJSON = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+  .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok || j.error) throw new Error(j.error || `Error ${r.status}`); return j; });
+const setNote = (msg, warn) => { $("autoNote").textContent = msg; $("autoNote").style.color = warn ? "var(--amber)" : ""; };
+const defaultNote = "Every 30 min · notifies this phone about new hits";
+
+async function showAutoStatus() {
+  $("autobar").hidden = !$("auto").checked;
+  if (!$("auto").checked) return;
+  try {
+    const j = await fetch("/api/push?action=status&t=" + Date.now()).then(r => r.json());
+    $("autoLast").textContent = j.lastRun ? `Last auto-scan ${new Date(j.lastRun.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · ${j.lastRun.hits} hit${j.lastRun.hits === 1 ? "" : "s"}` : "Waiting for the first auto-scan…";
+  } catch { $("autoLast").textContent = ""; }
+}
+
+async function enableAuto() {
+  if (!pushOK) {
+    throw new Error(isIOS && !standalone ? "Open Weather Scanner from your home screen icon to turn on notifications"
+                                         : "This browser can't receive notifications");
+  }
+  const perm = await Notification.requestPermission(); // must come first, straight from the tap
+  if (perm !== "granted") throw new Error("Notifications are blocked. Allow them in Settings → Notifications → Weather Scanner");
+  const reg = await navigator.serviceWorker.ready;
+  const { publicKey, error } = await fetch("/api/push?action=key").then(r => r.json());
+  if (error) throw new Error(error);
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(publicKey) });
+  await postJSON("/api/push?action=subscribe", { subscription: sub.toJSON(), near: $("near").checked });
+}
+
+async function disableAuto() {
+  if (!pushOK) return;
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) { await postJSON("/api/push?action=unsubscribe", { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe().catch(() => {}); }
+}
+
+$("auto").onchange = async e => {
+  const on = e.target.checked;
+  e.target.disabled = true; setNote(on ? "Turning on…" : "Turning off…");
+  try {
+    if (on) { await enableAuto(); setNote(defaultNote); toast("Auto-scan on 🔔"); }
+    else { await disableAuto(); setNote(defaultNote); }
+    try { localStorage.setItem("auto", on ? "1" : "0"); } catch {}
+  } catch (err) {
+    e.target.checked = false; setNote(err.message, true);
+    try { localStorage.setItem("auto", "0"); } catch {}
+  }
+  e.target.disabled = false; showAutoStatus();
+};
+
+$("autoTest").onclick = async () => {
+  try {
+    const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+    if (!sub) throw new Error("Not subscribed");
+    await postJSON("/api/push?action=test", { endpoint: sub.endpoint });
+    toast("Test sent, check your notifications");
+  } catch (err) { toast("Test failed: " + err.message); }
+};
+
+// Keep the near-miss preference in sync for auto-scan alerts
+$("near").addEventListener("change", async () => {
+  if (!$("auto").checked || !pushOK) return;
+  const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+  if (sub) postJSON("/api/push?action=subscribe", { subscription: sub.toJSON(), near: $("near").checked }).catch(() => {});
+});
+
+// On load: reflect whether this phone is subscribed
+(async () => {
+  if (!pushOK) return;
+  try {
+    const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+    $("auto").checked = !!sub && Notification.permission === "granted";
+  } catch {}
+  showAutoStatus();
+})();
+
 $("scan").onclick = () => runScan($("scan"));
 $("rainScan").onclick = () => runScan($("rainScan"));
 $("nightScan").onclick = () => runScan($("nightScan"));
@@ -587,6 +676,12 @@ try { const v = localStorage.getItem("near"); if (v) $("near").checked = v === "
 $("near").onchange = e => { try { localStorage.setItem("near", e.target.checked ? "1" : "0"); } catch {} };
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+// Opened from a notification → run the Edge temp scan straight away
+if (new URLSearchParams(location.search).get("scan") === "temp") {
+  history.replaceState(null, "", "/");
+  runScan($("scan"));
+}
 </script>
 </body>
 </html>

@@ -127,7 +127,7 @@ async function pageAll(base, maxPages, deadline) {
   return out;
 }
 
-async function getTempEvents(t0) {
+export async function getTempEvents(t0) {
   const found = new Map();
   const add = list => { for (const ev of list || []) if (ev && isTempEvent(ev) && !ev.closed) found.set(String(ev.id), ev); };
   const now = Date.now();
@@ -423,7 +423,7 @@ async function sunScan(events, t0, maxCloudLimit = SUN_MAX_CLOUD) {
 }
 
 // ---------- Edge temperature scan ----------
-async function tempScan(events, t0, near = 0) {
+export async function tempScan(events, t0, near = 0) {
   const hits = [], skipped = [], overview = [];
   let finished = 0, partial = false;
   const work = Promise.all(events.map(async ev => { try {

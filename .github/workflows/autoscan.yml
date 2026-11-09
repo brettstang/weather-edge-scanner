@@ -1,0 +1,13 @@
+# Runs the Edge temp auto-scan every 30 minutes and notifies subscribed phones about new hits.
+name: Auto-scan
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch: {}
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Trigger scan
+        run: curl -fsS --max-time 90 https://weather-edge-scanner.vercel.app/api/cron
