@@ -108,6 +108,10 @@
   .row .detail { margin:6px -4px 12px; cursor:default; }
   .row .detail .card { margin:0; }
   .row .detail .loading { text-align:center; color:var(--muted); padding:16px; font-size:14px; }
+  .obs { display:flex; gap:8px; align-items:flex-start; margin:10px 0 2px; padding:9px 12px; border-radius:12px;
+         background:rgba(94,200,255,.08); border:1px solid rgba(94,200,255,.25); font-size:13px; line-height:1.4; color:#cfe9ff; }
+  .obs b { color:#fff; }
+  .badge.LOCK { background:rgba(62,230,160,.18); color:var(--green); }
   .cap { font-size:12px; color:var(--faint); margin-top:12px; }
   details.hours { margin:10px 0 2px; }
   details.hours summary { background:rgba(255,255,255,.06); padding:10px 14px; border-radius:12px; font-size:14px; }
@@ -317,9 +321,16 @@ function linkRow(h) {
   </div>`;
 }
 
+function obsLine(o, unit, extra) {
+  if (!o) return "";
+  return `<div class="obs">📡<div>Observed so far today: <b>${Math.round(o.max * 10) / 10}°${unit}</b> at ${esc(o.at)}
+    <span style="color:var(--muted)">· ${o.count} airport report${o.count === 1 ? "" : "s"} (aviationweather.gov)</span>${extra ? `<br>${extra}` : ""}</div></div>`;
+}
+
 function hitCard(h, row) {
   const sign = h.past > 0 ? `${h.past}° past the line` : h.past === 0 ? "right on the line" : `${Math.abs(h.past)}° short`;
-  const badge = h.status === "none" ? `<span class="badge nearb" style="background:rgba(255,255,255,.1);color:var(--muted)">NO HIT · ${Math.abs(h.past)}° FROM ${h.side}</span>`
+  const badge = h.locked ? `<span class="badge LOCK">✅ ALREADY HIT</span>`
+              : h.status === "none" ? `<span class="badge nearb" style="background:rgba(255,255,255,.1);color:var(--muted)">NO HIT · ${Math.abs(h.past)}° FROM ${h.side}</span>`
               : h.nearMiss ? `<span class="badge nearb">NEAR · ${h.side}</span>`
                            : `<span class="badge ${h.side}">${h.side === "LOW" ? "❄︎ LOW EDGE" : "🔥 HIGH EDGE"}</span>`;
   const low = row?.low?.threshold ?? (h.side === "LOW" ? h.threshold : null);
@@ -330,9 +341,10 @@ function hitCard(h, row) {
       ${badge}
     </div>
     <div class="nums">
-      <div class="temp"><small>Forecast high</small>${Math.round(h.forecast * 10) / 10}°<span style="font-size:22px">${h.unit}</span></div>
+      <div class="temp"><small>${h.observed && h.forecastModel != null && h.observed.max >= h.forecastModel ? "High so far" : "Forecast high"}</small>${Math.round(h.forecast * 10) / 10}°<span style="font-size:22px">${h.unit}</span></div>
       <div class="odds"><small>Market says</small><b>${pct(h.yesPct)}</b><div class="no">No ${pct(h.noPct)}</div></div>
     </div>
+    ${obsLine(h.observed, h.unit, h.locked ? "The airport has already reached this edge today." : h.forecastModel != null && h.forecastModel < h.forecast - 0.05 ? `Already above the model forecast of ${Math.round(h.forecastModel * 10) / 10}°.` : "")}
     ${bar(low, high, h.forecast, h.unit)}
     ${modelBox(h)}
     ${linkRow(h)}
@@ -466,6 +478,7 @@ function renderNight(data) {
       <div class="temp"><small>Peak at ${esc(h.peakTime)}</small>${fmt(h.peak)}°<span style="font-size:22px">${h.unit}</span></div>
       <div class="odds"><small>Daytime max ${fmt(h.dayMax)}° at ${esc(h.dayTime)}</small><b>+${h.margin}°</b><div class="no">warmer at night</div></div>
     </div>
+    ${obsLine(h.observed, h.unit, h.locked ? "The peak shown has already been recorded; past hours use real airport readings." : "Past hours use real airport readings; later hours use the forecast.")}
     ${spark(h.temps, +h.peakTime.slice(0, 2))}
     <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
     ${xbtn(h.slug, "night")}

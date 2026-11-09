@@ -223,8 +223,53 @@ async function forecastHigh(lat, lon, unit, date) {
   const i = d ? d.time.indexOf(date) : -1;
   // The station's local date right now, so finished days can be skipped.
   const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
-  return { value: i >= 0 ? d.temperature_2m_max[i] : null, localToday };
+  return { value: i >= 0 ? d.temperature_2m_max[i] : null, localToday, offset: data.utc_offset_seconds || 0 };
 }
+
+// ---------- Observed temperatures so far today (aviationweather.gov METARs) ----------
+// Airport reports, roughly hourly. Weather Underground's airport history is built from these.
+const obsCache = {};
+const signed = (s, d) => (s === "1" ? -1 : 1) * Number(d) / 10;
+export function parseMetar(o) {
+  const raw = o.rawOb || o.raw_text || "";
+  const rmk = raw.includes(" RMK ") ? raw.split(" RMK ")[1] : "";
+  let c = typeof o.temp === "number" ? o.temp : null;
+  const t = rmk.match(/(?:^|\s)T([01])(\d{3})[01]\d{3}(?=\s|$)/);       // precise temp, e.g. T01560072 = 15.6°C
+  if (t) c = signed(t[1], t[2]);
+  const m6 = rmk.match(/(?:^|\s)1([01])(\d{3})(?=\s|$)/);                // 6-hour max, e.g. 10178 = 17.8°C
+  const time = typeof o.obsTime === "number" ? o.obsTime * 1000 : Date.parse(o.reportTime || o.obsTime);
+  return { time, c, max6: m6 ? signed(m6[1], m6[2]) : null };
+}
+function stationObs(code) {
+  if (!/^[A-Z]{4}$/.test(code)) return Promise.resolve(null);
+  if (!obsCache[code]) obsCache[code] = getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=36`)
+    .then(list => (Array.isArray(list) ? list : []).map(parseMetar).filter(x => x.time && (x.c != null || x.max6 != null)))
+    .catch(() => null);
+  return obsCache[code];
+}
+// Summarise today's observations in the station's local time and the market's unit.
+export function observedToday(obs, offsetSec, date, unit) {
+  if (!obs || !obs.length) return null;
+  const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
+  const hourly = new Array(24).fill(null);
+  let max = null, maxHour = null, count = 0;
+  for (const o of obs) {
+    const local = new Date(o.time + offsetSec * 1000);
+    if (local.toISOString().slice(0, 10) !== date) continue;
+    const hr = local.getUTCHours();
+    if (o.c != null) {
+      const v = conv(o.c); count++;
+      if (hourly[hr] == null || v > hourly[hr]) hourly[hr] = v;
+      if (max == null || v > max) { max = v; maxHour = hr; }
+    }
+    // A 6-hour max reported at 06:00 or later covers only today's hours
+    if (o.max6 != null && hr >= 6) { const v = conv(o.max6); if (max == null || v > max) { max = v; maxHour = hr; } }
+  }
+  if (max == null) return null;
+  const nowHour = new Date(Date.now() + offsetSec * 1000).getUTCHours();
+  return { hourly, max: Math.round(max * 10) / 10, maxHour, nowHour, count };
+}
+const hh = h => String(h).padStart(2, "0") + ":00";
 
 // ---------- Rain scan ----------
 // An hour is "rainy" when Open-Meteo forecasts at least RAIN_PROB % chance AND at least RAIN_MM mm.
@@ -335,6 +380,19 @@ async function nightScan(events, t0) {
     const temps = new Array(24).fill(null);
     for (let i = 0; i < h.time.length; i++) if (h.time[i].startsWith(date)) temps[+h.time[i].slice(11, 13)] = h.temperature_2m[i];
     if (temps.every(v => v == null)) return;
+    // Today: replace hours already passed with what the airport actually recorded
+    let observed = null;
+    if (date === localToday) {
+      const ob = observedToday(await stationObs(code), data.utc_offset_seconds || 0, date, unit);
+      if (ob) {
+        for (let hr = 0; hr <= ob.nowHour; hr++) if (ob.hourly[hr] != null) {
+          temps[hr] = hr < ob.nowHour ? ob.hourly[hr] : Math.max(temps[hr] ?? -Infinity, ob.hourly[hr]);
+        }
+        // A 6-hour max between readings can beat every hourly value
+        if (ob.maxHour != null && ob.max > Math.max(...temps.filter(v => v != null))) temps[ob.maxHour] = ob.max;
+        observed = { max: ob.max, at: hh(ob.maxHour), count: ob.count, nowHour: ob.nowHour };
+      }
+    }
     let peakHour = -1, peak = -Infinity, dayMax = -Infinity, dayHour = -1, nightMax = -Infinity;
     temps.forEach((v, hr) => {
       if (v == null) return;
@@ -346,7 +404,8 @@ async function nightScan(events, t0) {
     const row = {
       city, date, unit, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
       peak, peakTime: String(peakHour).padStart(2, "0") + ":00", dayMax, dayTime: String(dayHour).padStart(2, "0") + ":00",
-      margin, temps, leading: leadingBucket(ev), night: nightMax > dayMax
+      margin, temps, leading: leadingBucket(ev), night: nightMax > dayMax,
+      observed, locked: !!(observed && peakHour < observed.nowHour)
     };
     overview.push(row);
     if (row.night) hits.push(row);
@@ -487,8 +546,16 @@ export async function tempScan(events, t0, near = 0) {
       let f;
       try { f = await forecastHigh(st[0], st[1], b.unit, date); } catch { f = null; }
       if (f && date < f.localToday) { isFinished = true; break; }
-      const fc = f ? f.value : null;
+      let fc = f ? f.value : null;
       if (fc == null) continue;
+      // Today: the high can't end up below what the airport has already recorded
+      let obsNow = null;
+      if (f && date === f.localToday) {
+        obsNow = observedToday(await stationObs(code), f.offset, date, b.unit);
+        if (obsNow) row.observed = { max: obsNow.max, at: hh(obsNow.maxHour), count: obsNow.count };
+      }
+      const fcModel = fc;
+      if (obsNow && obsNow.max > fc) fc = obsNow.max;
       const p = yesPrice(m);
       const yesPct = p == null ? null : Math.round(p * 1000) / 10;
       row.unit = b.unit; row.forecast = fc;
@@ -501,7 +568,9 @@ export async function tempScan(events, t0, near = 0) {
           threshold: b.value, unit: b.unit, forecast: fc, rounded: r, past,
           yesPct, noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
           station: code, stationName: st[2], lat: st[0], lon: st[1],
-          url: row.url, slug: ev.slug, nearMiss: past < 0, settle: settlementLink(ev)
+          url: row.url, slug: ev.slug, nearMiss: past < 0, settle: settlementLink(ev),
+          forecastModel: fcModel, observed: row.observed || null,
+          locked: !!(obsNow && b.side === "HIGH" && Math.round(obsNow.max) >= b.value)
         };
         hits.push(hit);
         if (!row.hit || (row.hit.nearMiss && !hit.nearMiss)) row.hit = hit;
