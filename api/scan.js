@@ -285,8 +285,10 @@ async function rainScan(events, t0) {
   const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
   await Promise.race([work, stop]);
   clearTimeout(timer);
-  const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
-  hits.sort(byDate); overview.sort(byDate);
+  // Most rain first: longest run of rainy hours, then total rainy hours, then rainfall.
+  const byRain = (a, b) => b.longest - a.longest || b.rainyHours - a.rainyHours || b.dayMm - a.dayMm
+    || a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
+  hits.sort(byRain); overview.sort(byRain);
   return { mode: "rain", rules: { prob: RAIN_PROB, mm: RAIN_MM, streak: RAIN_STREAK }, hits, overview, skipped, finished, partial };
 }
 
