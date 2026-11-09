@@ -61,11 +61,21 @@
   }
   .scan:active { transform:scale(.98); }
   .scan:disabled { filter:saturate(.5) brightness(.85); }
-  .btns { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
-  .btns .scan { flex-direction:column; gap:6px; font-size:14px; padding:14px 6px 13px; border-radius:18px; }
+  .btns { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+  .btns .scan { flex-direction:row; gap:8px; font-size:16px; padding:16px 8px; border-radius:18px; }
   .btns .scan .ico { font-size:24px; line-height:1; }
   .btns .scan.busy .ico { display:none; }
-  .btns .scan .spinner { width:24px; height:24px; }
+  .btns .scan .spinner { width:22px; height:22px; }
+  .scan.sun { background:linear-gradient(135deg,#ff9f1c 0%,#ffbf3c 50%,#ffd86b 100%); color:#3a2300; box-shadow:0 10px 30px rgba(255,170,40,.4), inset 0 1px 0 rgba(255,255,255,.35); }
+  .scan.sun .spinner { border-color:rgba(58,35,0,.25); border-top-color:#3a2300; }
+  .card.SUN::before { background:linear-gradient(#ffd86b,#ff9f1c); }
+  .badge.SUN { background:rgba(255,200,80,.16); color:#ffd27a; }
+  .clouds { display:grid; grid-template-columns:repeat(24,1fr); align-items:end; gap:2px; height:32px; margin:6px 0 4px; }
+  .cap { font-size:12px; color:var(--faint); margin-top:12px; }
+  .clouds i { border-radius:3px 3px 1px 1px; min-height:4px; background:rgba(255,255,255,.55); }
+  .clouds i.sunny { background:linear-gradient(#ffd86b,#ff9f1c); }
+  .clouds i.dark { background:rgba(255,255,255,.08); }
+  .row .clouds { height:26px; margin:10px 0 4px; }
   .scan.night { background:linear-gradient(135deg,#3b2a8f 0%,#6a3df0 55%,#c86dd7 100%); box-shadow:0 10px 30px rgba(106,61,240,.4), inset 0 1px 0 rgba(255,255,255,.25); }
   .card.NIGHT::before { background:linear-gradient(#c86dd7,#6a3df0); }
   .badge.NIGHT { background:rgba(160,120,255,.18); color:#cdb6ff; }
@@ -92,6 +102,11 @@
             background:var(--glass); border:1px solid var(--stroke); border-radius:16px;
             -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); }
   .toggle span { font-size:15px; } .toggle small { display:block; color:var(--faint); font-size:12px; margin-top:2px; }
+  .slider input[type=range] { width:100%; margin:12px 0 2px; -webkit-appearance:none; appearance:none; height:6px; border-radius:6px;
+    background:linear-gradient(90deg,#ffd86b var(--fill,20%),rgba(255,255,255,.15) var(--fill,20%)); outline:none; }
+  .slider input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:26px; height:26px; border-radius:50%; background:#fff;
+    box-shadow:0 2px 8px rgba(0,0,0,.35); }
+  .slider b { color:#ffd27a; }
   .switch { position:relative; width:51px; height:31px; flex:none; }
   .switch input { opacity:0; width:0; height:0; }
   .switch i { position:absolute; inset:0; border-radius:31px; background:rgba(255,255,255,.18); transition:.25s; }
@@ -195,14 +210,19 @@
       <div><span>Include near misses</span><small>Temperature scan: forecast within 1° of an edge</small></div>
       <span class="switch"><input type="checkbox" id="near"><i></i></span>
     </label>
+    <div class="toggle slider">
+      <div style="flex:1"><span>Sunny day cloud limit: <b id="cloudVal">10%</b></span><small>Every daylight hour must have this much cloud or less</small>
+        <input type="range" id="cloud" min="0" max="50" step="5" value="10"></div>
+    </div>
     <div class="btns">
       <button class="scan" id="scan" data-mode="temp"><span class="ico">🌡️</span><span class="spinner"></span><span class="lbl">Edge temp</span></button>
       <button class="scan rain" id="rainScan" data-mode="rain"><span class="ico">🌧️</span><span class="spinner"></span><span class="lbl">Steady rain</span></button>
       <button class="scan night" id="nightScan" data-mode="night"><span class="ico">🌙</span><span class="spinner"></span><span class="lbl">Night high</span></button>
+      <button class="scan sun" id="sunScan" data-mode="sun"><span class="ico">☀️</span><span class="spinner"></span><span class="lbl">Sunny day</span></button>
     </div>
   </div>
 
-  <div id="out"><p class="hint"><b>Edge temp</b>: forecast highs that land in an edge bucket.<br><b>Steady rain</b>: 3+ hours in a row with ≥50% chance and ≥0.1 mm.<br><b>Night high</b>: the day's high comes between 9pm and 5am.<br>All scans use every city and day open on Polymarket.</p></div>
+  <div id="out"><p class="hint"><b>Edge temp</b>: forecast highs that land in an edge bucket.<br><b>Steady rain</b>: 3+ hours in a row with ≥50% chance and ≥0.1 mm.<br><b>Night high</b>: the day's high comes between 9pm and 5am.<br><b>Sunny day</b>: every daylight hour under your cloud limit, no rain.<br>All scans use every city and day open on Polymarket.</p></div>
 </div>
 
 <script>
@@ -387,6 +407,56 @@ function renderNight(data) {
   $("out").innerHTML = html;
 }
 
+// Cloud bars: height = cloud cover. Sunny daylight hours (<=10%) are gold, night hours dimmed.
+function cloudBars(clouds, daylight, limit = 10) {
+  return `<div class="clouds">${clouds.map((c, i) => {
+    const hgt = c == null ? 0 : Math.max(8, c);
+    const cls = !daylight[i] ? "dark" : c <= limit ? "sunny" : "";
+    return `<i class="${cls}" style="height:${!daylight[i] ? 8 : hgt}%"></i>`;
+  }).join("")}</div>`;
+}
+
+function renderSun(data) {
+  const ov = data.overview || [];
+  const lim = data.rules?.maxCloud ?? 10;
+  let html = `
+    <div class="stats">
+      <div class="stat"><b>${ov.length}</b><span>Days checked</span></div>
+      <div class="stat hit"><b>${data.hits.length}</b><span>Sunny days</span></div>
+      <div class="stat near"><b>${ov.filter(o => !o.clear && o.maxCloud <= lim + 20 && o.dayRain === 0).length}</b><span>Within 20%</span></div>
+    </div>
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    <div class="when">Sunny day scan · ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })} · times are local to each city</div>
+    <div class="section">Sunny all day (≤${lim}% cloud, no rain)</div>`;
+  if (!data.hits.length) html += `<div class="card empty"><div>⛅</div>No open day stays at or under ${lim}% cloud from sunrise to sunset. Try raising the cloud limit.</div>`;
+  html += data.hits.map(h => `<div class="card SUN">
+    <div class="top">
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div></div>
+      <span class="badge SUN">☀️ ${h.maxCloud === 0 ? "CLOUDLESS" : "SUNNY"}</span>
+    </div>
+    <div class="nums">
+      <div class="temp"><small>Max daytime cloud</small>${h.maxCloud}<span style="font-size:22px">%</span></div>
+      <div class="odds"><small>Sunrise ${esc(h.sunrise)} · Sunset ${esc(h.sunset)}</small><b>${h.sunPct ?? "?"}%</b><div class="no">of daylight sunny</div></div>
+    </div>
+    <div class="cap">Cloud cover by hour · gold = sunny hour</div>
+    ${cloudBars(h.clouds, h.daylight, lim)}
+    <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
+    <div class="meta">
+      <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">${h.leading ? `Market favours ${esc(h.leading.label)} at ${pct(h.leading.yesPct)}` : ""}</span></div>
+      <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
+    </div>
+  </div>`).join("");
+  if (ov.length) html += `<div class="section">Every day</div><details><summary>All days (${ov.length})</summary>${ov.map(o => `
+    <div class="row">
+      <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      ${cloudBars(o.clouds, o.daylight, lim)}
+      <div class="edges" style="margin-top:4px !important"><span>Max cloud ${o.maxCloud}% · avg ${o.avgCloud}%</span><span style="color:${o.clear ? "#ffd27a" : "var(--muted)"}">${o.dayRain > 0 ? `${o.dayRain} mm rain` : `${o.sunPct ?? "?"}% sunny`}</span></div>
+    </div>`).join("")}</details>`;
+  if (data.skipped.length) html += `<details style="margin-top:10px"><summary>Skipped (${data.skipped.length})</summary>${data.skipped.map(s =>
+    `<div class="skip">${esc(s.title)} – ${esc(s.reason)}</div>`).join("")}</details>`;
+  $("out").innerHTML = html;
+}
+
 async function runScan(btn) {
   const mode = btn.dataset.mode;
   document.querySelectorAll(".scan").forEach(b => b.disabled = true);
@@ -395,13 +465,13 @@ async function runScan(btn) {
   lbl.textContent = "Scanning…";
   try {
     const near = $("near").checked ? 1 : 0;
-    const r = await fetch(`/api/scan?mode=${mode}&near=${near}&t=${Date.now()}`);
+    const r = await fetch(`/api/scan?mode=${mode}&near=${near}&cloud=${$("cloud").value}&t=${Date.now()}`);
     const body = await r.text();
     let data;
     try { data = JSON.parse(body); }
     catch { throw new Error(`Server returned ${r.status}${r.status === 504 ? " (scan timed out)" : ""}: ${body.slice(0, 120)}`); }
     if (data.error) throw new Error(data.error);
-    mode === "rain" ? renderRain(data) : mode === "night" ? renderNight(data) : render(data);
+    mode === "rain" ? renderRain(data) : mode === "night" ? renderNight(data) : mode === "sun" ? renderSun(data) : render(data);
   } catch (e) {
     $("out").innerHTML = `<div class="error">Scan failed: ${esc(e.message)}</div>`;
   }
@@ -411,6 +481,7 @@ async function runScan(btn) {
 $("scan").onclick = () => runScan($("scan"));
 $("rainScan").onclick = () => runScan($("rainScan"));
 $("nightScan").onclick = () => runScan($("nightScan"));
+$("sunScan").onclick = () => runScan($("sunScan"));
 
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("show");
@@ -426,6 +497,15 @@ $("share").onclick = async () => {
   try { await navigator.clipboard.writeText(url); toast("Link copied"); }
   catch { toast(url); }
 };
+
+function syncCloud() {
+  const v = $("cloud").value;
+  $("cloudVal").textContent = v + "%";
+  $("cloud").style.setProperty("--fill", (v / 50 * 100) + "%");
+}
+try { const c = localStorage.getItem("cloud"); if (c != null) $("cloud").value = c; } catch {}
+syncCloud();
+$("cloud").oninput = () => { syncCloud(); try { localStorage.setItem("cloud", $("cloud").value); } catch {} };
 
 try { const v = localStorage.getItem("near"); if (v) $("near").checked = v === "1"; } catch {}
 $("near").onchange = e => { try { localStorage.setItem("near", e.target.checked ? "1" : "0"); } catch {} };

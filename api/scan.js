@@ -361,7 +361,80 @@ async function nightScan(events, t0) {
   return { mode: "night", hits, overview, skipped, finished, partial };
 }
 
+// ---------- Sunny day scan ----------
+// Flags days where EVERY daylight hour (sunrise..sunset, station local time) has
+// cloud cover <= SUN_MAX_CLOUD % and no precipitation.
+const SUN_MAX_CLOUD = 10;
+const skyCache = {};
+async function skyData(lat, lon) {
+  const key = `${lat},${lon}`;
+  if (!skyCache[key]) skyCache[key] = getJSON(
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=cloud_cover,precipitation&daily=sunrise,sunset,sunshine_duration,daylight_duration&timezone=auto&past_days=1&forecast_days=16`
+  );
+  return skyCache[key];
+}
+
+async function sunScan(events, t0, maxCloudLimit = SUN_MAX_CLOUD) {
+  const hits = [], overview = [], skipped = [];
+  let finished = 0, partial = false;
+  const work = Promise.all(events.map(async ev => { try {
+    const code = findStation(ev);
+    const st = code ? await lookupStation(code) : null;
+    if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
+    const date = parseDate(ev);
+    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    let data;
+    try { data = await skyData(st[0], st[1]); } catch { return; }
+    const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
+    if (date < localToday) { finished++; return; }
+    const d = data.daily, h = data.hourly;
+    const di = d ? d.time.indexOf(date) : -1;
+    if (di < 0 || !h) return;
+    const sunrise = d.sunrise[di].slice(11, 16), sunset = d.sunset[di].slice(11, 16);
+    const clouds = new Array(24).fill(null), rain = new Array(24).fill(0), daylight = new Array(24).fill(false);
+    for (let i = 0; i < h.time.length; i++) if (h.time[i].startsWith(date)) {
+      const hr = +h.time[i].slice(11, 13), hhmm = h.time[i].slice(11, 16);
+      clouds[hr] = h.cloud_cover[i]; rain[hr] = h.precipitation[i] || 0;
+      daylight[hr] = hhmm >= sunrise.slice(0, 2) + ":00" && hhmm <= sunset;
+    }
+    const dayIdx = clouds.map((_, i) => i).filter(i => daylight[i] && clouds[i] != null);
+    if (!dayIdx.length) return;
+    const maxCloud = Math.max(...dayIdx.map(i => clouds[i]));
+    const avgCloud = Math.round(dayIdx.reduce((a, i) => a + clouds[i], 0) / dayIdx.length);
+    const dayRain = Math.round(dayIdx.reduce((a, i) => a + rain[i], 0) * 10) / 10;
+    const sunPct = d.daylight_duration && d.daylight_duration[di] ? Math.round((d.sunshine_duration[di] / d.daylight_duration[di]) * 100) : null;
+    const row = {
+      city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`,
+      sunrise, sunset, maxCloud, avgCloud, dayRain, sunPct, clouds, daylight, leading: leadingBucket(ev),
+      clear: maxCloud <= maxCloudLimit && dayRain === 0
+    };
+    overview.push(row);
+    if (row.clear) hits.push(row);
+  } catch (e) { skipped.push({ title: ev.title, reason: "Error: " + (e && e.message || e) }); } }));
+  let timer;
+  const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
+  await Promise.race([work, stop]);
+  clearTimeout(timer);
+  // Clearest first: lowest peak cloud, then lowest average cloud, then most sunshine
+  const byClear = (a, b) => a.maxCloud - b.maxCloud || a.avgCloud - b.avgCloud || (b.sunPct ?? 0) - (a.sunPct ?? 0)
+    || a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
+  hits.sort(byClear); overview.sort(byClear);
+  return { mode: "sun", rules: { maxCloud: maxCloudLimit }, hits, overview, skipped, finished, partial };
+}
+
 export default async function handler(req, res) {
+  if ((req.query && req.query.mode) === "sun") {
+    const t0 = Date.now();
+    try {
+      const events = await getTempEvents(t0);
+      const cloud = Math.min(100, Math.max(0, parseInt(req.query.cloud, 10)));
+      const out = await sunScan(events, t0, Number.isFinite(cloud) ? cloud : SUN_MAX_CLOUD);
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
+    } catch (e) {
+      return res.status(500).json({ error: String(e && e.message || e) });
+    }
+  }
   if ((req.query && req.query.mode) === "night") {
     const t0 = Date.now();
     try {
