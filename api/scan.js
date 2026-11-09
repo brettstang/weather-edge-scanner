@@ -182,9 +182,11 @@ function findStation(ev) {
 
 function parseDate(ev) {
   const m = (ev.title || "").match(/on ([A-Za-z]+ \d{1,2})/);
-  const end = ev.endDate ? new Date(ev.endDate) : new Date();
+  let end = ev.endDate ? new Date(ev.endDate) : new Date();
+  if (isNaN(end)) end = new Date();
   if (!m) return end.toISOString().slice(0, 10);
   let d = new Date(`${m[1]} ${end.getUTCFullYear()} 12:00 UTC`);
+  if (isNaN(d)) return end.toISOString().slice(0, 10);
   if (d - end > 60 * 86400000) d = new Date(`${m[1]} ${end.getUTCFullYear() - 1} 12:00 UTC`);
   return d.toISOString().slice(0, 10);
 }
@@ -224,7 +226,82 @@ async function forecastHigh(lat, lon, unit, date) {
   return { value: i >= 0 ? d.temperature_2m_max[i] : null, localToday };
 }
 
+// ---------- Rain scan ----------
+// An hour is "rainy" when Open-Meteo forecasts at least RAIN_PROB % chance AND at least RAIN_MM mm.
+// A day is flagged when it has RAIN_STREAK or more rainy hours in a row (station local time).
+const RAIN_PROB = 50, RAIN_MM = 0.1, RAIN_STREAK = 3;
+const rainCache = {};
+async function rainDay(lat, lon, date) {
+  const key = `${lat},${lon}`;
+  if (!rainCache[key]) rainCache[key] = getJSON(
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation,precipitation_probability&timezone=auto&past_days=1&forecast_days=16`
+  );
+  const data = await rainCache[key];
+  const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
+  const h = data.hourly;
+  if (!h) return { localToday, hours: null };
+  const hours = [];
+  for (let i = 0; i < h.time.length; i++) if (h.time[i].startsWith(date)) {
+    const mm = h.precipitation[i], prob = h.precipitation_probability ? h.precipitation_probability[i] : null;
+    hours.push({ t: h.time[i].slice(11, 16), mm, prob, rainy: mm != null && prob != null && mm >= RAIN_MM && prob >= RAIN_PROB });
+  }
+  // Longest run of rainy hours
+  let best = null, cur = null;
+  for (const hr of hours) {
+    if (hr.rainy) {
+      if (!cur) cur = { start: hr.t, end: hr.t, len: 0, mm: 0, maxProb: 0 };
+      cur.len++; cur.end = hr.t; cur.mm += hr.mm; cur.maxProb = Math.max(cur.maxProb, hr.prob);
+      if (!best || cur.len > best.len) best = { ...cur };
+    } else cur = null;
+  }
+  const dayMm = hours.reduce((a, x) => a + (x.mm || 0), 0);
+  const rainyHours = hours.filter(x => x.rainy).length;
+  return { localToday, hours: hours.map(x => (x.rainy ? 1 : 0)), streak: best, dayMm, rainyHours };
+}
+
+async function rainScan(events, t0) {
+  const hits = [], overview = [], skipped = [];
+  let finished = 0, partial = false;
+  const work = Promise.all(events.map(async ev => { try {
+    const code = findStation(ev);
+    const st = code ? await lookupStation(code) : null;
+    if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
+    const date = parseDate(ev);
+    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    let r;
+    try { r = await rainDay(st[0], st[1], date); } catch { return; }
+    if (date < r.localToday) { finished++; return; }
+    if (!r.hours || !r.hours.length) return;
+    const row = {
+      city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`,
+      longest: r.streak ? r.streak.len : 0, start: r.streak?.start ?? null, end: r.streak?.end ?? null,
+      streakMm: r.streak ? Math.round(r.streak.mm * 10) / 10 : 0, maxProb: r.streak?.maxProb ?? null,
+      dayMm: Math.round(r.dayMm * 10) / 10, rainyHours: r.rainyHours, hours: r.hours
+    };
+    overview.push(row);
+    if (row.longest >= RAIN_STREAK) hits.push(row);
+  } catch (e) { skipped.push({ title: ev.title, reason: "Error: " + (e && e.message || e) }); } }));
+  let timer;
+  const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
+  await Promise.race([work, stop]);
+  clearTimeout(timer);
+  const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
+  hits.sort(byDate); overview.sort(byDate);
+  return { mode: "rain", rules: { prob: RAIN_PROB, mm: RAIN_MM, streak: RAIN_STREAK }, hits, overview, skipped, finished, partial };
+}
+
 export default async function handler(req, res) {
+  if ((req.query && req.query.mode) === "rain") {
+    const t0 = Date.now();
+    try {
+      const events = await getTempEvents(t0);
+      const out = await rainScan(events, t0);
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
+    } catch (e) {
+      return res.status(500).json({ error: String(e && e.message || e) });
+    }
+  }
   const near = parseFloat((req.query && req.query.near) || "0") || 0;
   const hits = [], skipped = [], overview = [];
   let finished = 0;
@@ -232,7 +309,7 @@ export default async function handler(req, res) {
   try {
     const events = await getTempEvents(t0);
     let partial = false;
-    const work = Promise.all(events.map(async ev => {
+    const work = Promise.all(events.map(async ev => { try {
       const code = findStation(ev);
       const st = code ? await lookupStation(code) : null;
       if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
@@ -269,7 +346,7 @@ export default async function handler(req, res) {
       }
       if (isFinished) { finished++; return; }
       if (row.forecast != null) overview.push(row);
-    }));
+    } catch (e) { skipped.push({ title: ev.title, reason: "Error: " + (e && e.message || e) }); } }));
     let timer;
     const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
     await Promise.race([work, stop]);

@@ -61,6 +61,17 @@
   }
   .scan:active { transform:scale(.98); }
   .scan:disabled { filter:saturate(.5) brightness(.85); }
+  .btns { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .btns .scan { font-size:17px; padding:17px 10px; }
+  .scan.rain { background:linear-gradient(135deg,#1fa2ff 0%,#12d8fa 55%,#3ee6a0 100%); box-shadow:0 10px 30px rgba(18,180,250,.35), inset 0 1px 0 rgba(255,255,255,.25); }
+  .card.RAIN::before { background:linear-gradient(#12d8fa,#1fa2ff); }
+  .badge.RAIN { background:rgba(18,216,250,.15); color:#7fe7ff; }
+  .strip { display:grid; grid-template-columns:repeat(24,1fr); gap:2px; margin:14px 0 4px; }
+  .strip i { height:16px; border-radius:3px; background:rgba(255,255,255,.08); }
+  .strip i.on { background:linear-gradient(#5ec8ff,#1fa2ff); box-shadow:0 0 8px rgba(30,160,255,.5); }
+  .strip i.run { background:linear-gradient(#7fe7ff,#12d8fa); }
+  .strip-labels { display:flex; justify-content:space-between; font-size:11px; color:var(--faint); margin-bottom:12px; }
+  .row .strip { margin:10px 0 4px; } .row .strip i { height:10px; }
   .spinner { width:18px; height:18px; border-radius:50%; border:2.5px solid rgba(255,255,255,.35); border-top-color:#fff;
              animation:spin .8s linear infinite; display:none; }
   .scan.busy .spinner { display:block; }
@@ -170,13 +181,16 @@
 
   <div class="controls">
     <label class="toggle">
-      <div><span>Include near misses</span><small>Forecast within 1° of an edge bucket</small></div>
+      <div><span>Include near misses</span><small>Temperature scan: forecast within 1° of an edge</small></div>
       <span class="switch"><input type="checkbox" id="near"><i></i></span>
     </label>
-    <button class="scan" id="scan"><span class="spinner"></span><span id="scanLabel">Scan markets</span></button>
+    <div class="btns">
+      <button class="scan" id="scan" data-mode="temp"><span class="spinner"></span><span class="lbl">🌡️ Temp scan</span></button>
+      <button class="scan rain" id="rainScan" data-mode="rain"><span class="spinner"></span><span class="lbl">🌧️ Rain scan</span></button>
+    </div>
   </div>
 
-  <div id="out"><p class="hint">Tap Scan to compare every open daily-high market<br>with the forecast at its settlement station.</p></div>
+  <div id="out"><p class="hint"><b>Temp scan</b>: forecast highs that land in an edge bucket.<br><b>Rain scan</b>: 3+ hours in a row with ≥50% chance and ≥0.1 mm.<br>Both use every city and day open on Polymarket.</p></div>
 </div>
 
 <script>
@@ -263,23 +277,77 @@ function render(data) {
   $("out").innerHTML = html;
 }
 
-$("scan").onclick = async () => {
-  const btn = $("scan");
-  btn.disabled = true; btn.classList.add("busy"); $("scanLabel").textContent = "Scanning…";
+function strip(hours, start, end) {
+  const h = i => String(i).padStart(2, "0") + ":00";
+  return `<div class="strip">${Array.from({ length: 24 }, (_, i) => {
+    const on = hours && hours[i];
+    const run = on && start && h(i) >= start && h(i) <= end;
+    return `<i class="${run ? "on run" : on ? "on" : ""}"></i>`;
+  }).join("")}</div>`;
+}
+
+function renderRain(data) {
+  const ov = data.overview || [];
+  let html = `
+    <div class="stats">
+      <div class="stat"><b>${ov.length}</b><span>Days checked</span></div>
+      <div class="stat hit"><b>${data.hits.length}</b><span>Steady rain</span></div>
+      <div class="stat near"><b>${ov.filter(o => o.rainyHours > 0 && o.longest < 3).length}</b><span>Some rain</span></div>
+    </div>
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    <div class="when">Rain scan · ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })} · times are local to each city</div>
+    <div class="section">Steady rain (3+ hours in a row)</div>`;
+  if (!data.hits.length) html += `<div class="card empty"><div>☀️</div>No city has 3+ rainy hours in a row on any open day.</div>`;
+  html += data.hits.map(h => `<div class="card RAIN">
+    <div class="top">
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div></div>
+      <span class="badge RAIN">🌧 STEADY RAIN</span>
+    </div>
+    <div class="nums">
+      <div class="temp"><small>Longest run</small>${h.longest}<span style="font-size:22px"> hrs</span></div>
+      <div class="odds"><small>${esc(h.start)} – ${esc(h.end)}</small><b>${h.streakMm} mm</b><div class="no">Peak chance ${h.maxProb ?? "?"}%</div></div>
+    </div>
+    ${strip(h.hours, h.start, h.end)}
+    <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
+    <div class="meta">
+      <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">${h.rainyHours} rainy hrs · ${h.dayMm} mm all day</span></div>
+      <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
+    </div>
+  </div>`).join("");
+  if (ov.length) html += `<div class="section">Every day</div><details><summary>All days (${ov.length})</summary>${ov.map(o => `
+    <div class="row">
+      <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      ${strip(o.hours, o.start, o.end)}
+      <div class="edges" style="margin-top:4px !important"><span>${o.longest ? `Longest ${o.longest} hr${o.longest > 1 ? "s" : ""}` : "No rainy hours"}</span><span>${o.dayMm} mm</span></div>
+    </div>`).join("")}</details>`;
+  if (data.skipped.length) html += `<details style="margin-top:10px"><summary>Skipped (${data.skipped.length})</summary>${data.skipped.map(s =>
+    `<div class="skip">${esc(s.title)} – ${esc(s.reason)}</div>`).join("")}</details>`;
+  $("out").innerHTML = html;
+}
+
+async function runScan(btn) {
+  const mode = btn.dataset.mode;
+  document.querySelectorAll(".scan").forEach(b => b.disabled = true);
+  btn.classList.add("busy");
+  const lbl = btn.querySelector(".lbl"), orig = lbl.textContent;
+  lbl.textContent = "Scanning…";
   try {
     const near = $("near").checked ? 1 : 0;
-    const r = await fetch(`/api/scan?near=${near}&t=${Date.now()}`);
+    const r = await fetch(`/api/scan?mode=${mode}&near=${near}&t=${Date.now()}`);
     const body = await r.text();
     let data;
     try { data = JSON.parse(body); }
     catch { throw new Error(`Server returned ${r.status}${r.status === 504 ? " (scan timed out)" : ""}: ${body.slice(0, 120)}`); }
     if (data.error) throw new Error(data.error);
-    render(data);
+    mode === "rain" ? renderRain(data) : render(data);
   } catch (e) {
     $("out").innerHTML = `<div class="error">Scan failed: ${esc(e.message)}</div>`;
   }
-  btn.disabled = false; btn.classList.remove("busy"); $("scanLabel").textContent = "Scan again";
-};
+  document.querySelectorAll(".scan").forEach(b => b.disabled = false);
+  btn.classList.remove("busy"); lbl.textContent = orig;
+}
+$("scan").onclick = () => runScan($("scan"));
+$("rainScan").onclick = () => runScan($("rainScan"));
 
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("show");
