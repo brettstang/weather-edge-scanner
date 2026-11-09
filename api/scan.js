@@ -273,7 +273,7 @@ async function rainScan(events, t0) {
     if (date < r.localToday) { finished++; return; }
     if (!r.hours || !r.hours.length) return;
     const row = {
-      city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`,
+      city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
       longest: r.streak ? r.streak.len : 0, start: r.streak?.start ?? null, end: r.streak?.end ?? null,
       streakMm: r.streak ? Math.round(r.streak.mm * 10) / 10 : 0, maxProb: r.streak?.maxProb ?? null,
       dayMm: Math.round(r.dayMm * 10) / 10, rainyHours: r.rainyHours, hours: r.hours
@@ -344,7 +344,7 @@ async function nightScan(events, t0) {
     });
     const margin = Math.round((nightMax - dayMax) * 10) / 10;
     const row = {
-      city, date, unit, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`,
+      city, date, unit, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
       peak, peakTime: String(peakHour).padStart(2, "0") + ":00", dayMax, dayTime: String(dayHour).padStart(2, "0") + ":00",
       margin, temps, leading: leadingBucket(ev), night: nightMax > dayMax
     };
@@ -404,7 +404,7 @@ async function sunScan(events, t0, maxCloudLimit = SUN_MAX_CLOUD) {
     const dayRain = Math.round(dayIdx.reduce((a, i) => a + rain[i], 0) * 10) / 10;
     const sunPct = d.daylight_duration && d.daylight_duration[di] ? Math.round((d.sunshine_duration[di] / d.daylight_duration[di]) * 100) : null;
     const row = {
-      city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`,
+      city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
       sunrise, sunset, maxCloud, avgCloud, dayRain, sunPct, clouds, daylight, leading: leadingBucket(ev),
       clear: maxCloud <= maxCloudLimit && dayRain === 0
     };
@@ -422,95 +422,110 @@ async function sunScan(events, t0, maxCloudLimit = SUN_MAX_CLOUD) {
   return { mode: "sun", rules: { maxCloud: maxCloudLimit }, hits, overview, skipped, finished, partial };
 }
 
-export default async function handler(req, res) {
-  if ((req.query && req.query.mode) === "sun") {
-    const t0 = Date.now();
-    try {
-      const events = await getTempEvents(t0);
-      const cloud = Math.min(100, Math.max(0, parseInt(req.query.cloud, 10)));
-      const out = await sunScan(events, t0, Number.isFinite(cloud) ? cloud : SUN_MAX_CLOUD);
-      res.setHeader("Cache-Control", "no-store");
-      return res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
-    } catch (e) {
-      return res.status(500).json({ error: String(e && e.message || e) });
-    }
-  }
-  if ((req.query && req.query.mode) === "night") {
-    const t0 = Date.now();
-    try {
-      const events = await getTempEvents(t0);
-      const out = await nightScan(events, t0);
-      res.setHeader("Cache-Control", "no-store");
-      return res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
-    } catch (e) {
-      return res.status(500).json({ error: String(e && e.message || e) });
-    }
-  }
-  if ((req.query && req.query.mode) === "rain") {
-    const t0 = Date.now();
-    try {
-      const events = await getTempEvents(t0);
-      const out = await rainScan(events, t0);
-      res.setHeader("Cache-Control", "no-store");
-      return res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
-    } catch (e) {
-      return res.status(500).json({ error: String(e && e.message || e) });
-    }
-  }
-  const near = parseFloat((req.query && req.query.near) || "0") || 0;
+// ---------- Edge temperature scan ----------
+async function tempScan(events, t0, near = 0) {
   const hits = [], skipped = [], overview = [];
-  let finished = 0;
+  let finished = 0, partial = false;
+  const work = Promise.all(events.map(async ev => { try {
+    const code = findStation(ev);
+    const st = code ? await lookupStation(code) : null;
+    if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
+    const date = parseDate(ev);
+    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    const row = { city, date, station: code, stationName: st[2], unit: null, forecast: null, low: null, high: null,
+                  url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug, hit: null };
+    let isFinished = false;
+    for (const m of ev.markets || []) {
+      if (m.closed) continue;
+      const label = m.groupItemTitle || m.question || "";
+      const b = parseBucket(label);
+      if (!b) continue;
+      let f;
+      try { f = await forecastHigh(st[0], st[1], b.unit, date); } catch { f = null; }
+      if (f && date < f.localToday) { isFinished = true; break; }
+      const fc = f ? f.value : null;
+      if (fc == null) continue;
+      const p = yesPrice(m);
+      const yesPct = p == null ? null : Math.round(p * 1000) / 10;
+      row.unit = b.unit; row.forecast = fc;
+      row[b.side === "LOW" ? "low" : "high"] = { threshold: b.value, label, yesPct };
+      const r = Math.round(fc);
+      const past = b.side === "HIGH" ? r - b.value : b.value - r;
+      if (past >= -near) {
+        const hit = {
+          city, date, side: b.side, bucket: label,
+          threshold: b.value, unit: b.unit, forecast: fc, rounded: r, past,
+          yesPct, noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
+          station: code, stationName: st[2], lat: st[0], lon: st[1],
+          url: row.url, slug: ev.slug, nearMiss: past < 0
+        };
+        hits.push(hit);
+        if (!row.hit || (row.hit.nearMiss && !hit.nearMiss)) row.hit = hit;
+      }
+    }
+    if (isFinished) { finished++; return; }
+    if (row.forecast != null) overview.push(row);
+  } catch (e) { skipped.push({ title: ev.title, reason: "Error: " + (e && e.message || e) }); } }));
+  let timer;
+  const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
+  await Promise.race([work, stop]);
+  clearTimeout(timer);
+  const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
+  hits.sort(byDate); overview.sort(byDate);
+  return { mode: "temp", hits, overview, skipped, finished, partial };
+}
+
+// ---------- Cross-check: run all four checks on one city/date ----------
+async function checkOne(slug, near, cloud) {
+  const found = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`);
+  const ev = Array.isArray(found) ? found[0] : found;
+  if (!ev) throw new Error("Market not found on Polymarket");
+  const t0 = Date.now();
+  const [t, r, n, s] = await Promise.all([
+    tempScan([ev], t0, near), rainScan([ev], t0), nightScan([ev], t0), sunScan([ev], t0, cloud)
+  ]);
+  const fmt = v => Math.round(v * 10) / 10;
+  const out = {};
+  const T = t.overview[0];
+  out.temp = !T ? { status: "na", detail: "No forecast available" }
+    : T.hit && !T.hit.nearMiss ? { status: "pass", detail: `Forecast ${fmt(T.forecast)}°${T.unit} is in ${T.hit.bucket} (${T.hit.yesPct ?? "?"}%)` }
+    : { status: T.hit ? "near" : "fail", detail: `Forecast ${fmt(T.forecast)}°${T.unit} · edges ${T.low ? "≤" + T.low.threshold + "°" : "–"} / ${T.high ? "≥" + T.high.threshold + "°" : "–"}` };
+  const R = r.overview[0];
+  out.rain = !R ? { status: "na", detail: "No forecast available" }
+    : { status: R.longest >= RAIN_STREAK ? "pass" : "fail",
+        detail: R.longest ? `Longest run ${R.longest} hr${R.longest > 1 ? "s" : ""} (${R.start}–${R.end}) · ${R.dayMm} mm all day` : `No rainy hours · ${R.dayMm} mm all day` };
+  const N = n.overview[0];
+  out.night = !N ? { status: "na", detail: "No forecast available" }
+    : { status: N.night ? "pass" : "fail",
+        detail: `Peak ${fmt(N.peak)}°${N.unit} at ${N.peakTime} · night ${N.margin > 0 ? "+" : ""}${N.margin}° vs day` };
+  const S = s.overview[0];
+  out.sun = !S ? { status: "na", detail: "No forecast available" }
+    : { status: S.clear ? "pass" : "fail",
+        detail: `Max daylight cloud ${S.maxCloud}% (limit ${cloud}%)${S.dayRain > 0 ? ` · ${S.dayRain} mm rain` : ` · ${S.sunPct ?? "?"}% sunny`}` };
+  return { slug, checks: out };
+}
+
+const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
+
+export default async function handler(req, res) {
+  const q = req.query || {};
+  const mode = q.mode || "temp";
+  const near = parseFloat(q.near || "0") || 0;
+  const cloudN = Math.min(100, Math.max(0, parseInt(q.cloud, 10)));
+  const cloud = Number.isFinite(cloudN) ? cloudN : SUN_MAX_CLOUD;
   const t0 = Date.now();
   try {
+    if (mode === "check") {
+      if (!q.slug) return send(res, 400, { error: "Missing market" });
+      return send(res, 200, await checkOne(String(q.slug), near, cloud));
+    }
     const events = await getTempEvents(t0);
-    let partial = false;
-    const work = Promise.all(events.map(async ev => { try {
-      const code = findStation(ev);
-      const st = code ? await lookupStation(code) : null;
-      if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
-      const date = parseDate(ev);
-      const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
-      const row = { city, date, station: code, stationName: st[2], unit: null, forecast: null, low: null, high: null,
-                    url: `https://polymarket.com/event/${ev.slug}` };
-      let isFinished = false;
-      for (const m of ev.markets || []) {
-        if (m.closed) continue;
-        const label = m.groupItemTitle || m.question || "";
-        const b = parseBucket(label);
-        if (!b) continue;
-        let f;
-        try { f = await forecastHigh(st[0], st[1], b.unit, date); } catch { f = null; }
-        if (f && date < f.localToday) { isFinished = true; break; }
-        const fc = f ? f.value : null;
-        if (fc == null) continue;
-        const p = yesPrice(m);
-        const yesPct = p == null ? null : Math.round(p * 1000) / 10;
-        row.unit = b.unit; row.forecast = fc;
-        row[b.side === "LOW" ? "low" : "high"] = { threshold: b.value, label, yesPct };
-        const r = Math.round(fc);
-        const past = b.side === "HIGH" ? r - b.value : b.value - r;
-        if (past >= -near) {
-          hits.push({
-            city, date, side: b.side, bucket: label,
-            threshold: b.value, unit: b.unit, forecast: fc, rounded: r, past,
-            yesPct, noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
-            station: code, stationName: st[2], lat: st[0], lon: st[1],
-            url: row.url, nearMiss: past < 0
-          });
-        }
-      }
-      if (isFinished) { finished++; return; }
-      if (row.forecast != null) overview.push(row);
-    } catch (e) { skipped.push({ title: ev.title, reason: "Error: " + (e && e.message || e) }); } }));
-    let timer;
-    const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
-    await Promise.race([work, stop]);
-    clearTimeout(timer);
-    const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
-    hits.sort(byDate); overview.sort(byDate);
-    res.setHeader("Cache-Control", "no-store");
-    res.status(200).json({ scannedAt: new Date().toISOString(), marketsFound: events.length, finished, hits, overview, skipped, partial, ms: Date.now() - t0 });
+    const out = mode === "rain" ? await rainScan(events, t0)
+      : mode === "night" ? await nightScan(events, t0)
+      : mode === "sun" ? await sunScan(events, t0, cloud)
+      : await tempScan(events, t0, near);
+    return send(res, 200, { scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
   } catch (e) {
-    res.status(500).json({ error: String(e && e.message || e) });
+    return send(res, 500, { error: String(e && e.message || e) });
   }
 }

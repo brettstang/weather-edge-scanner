@@ -72,6 +72,24 @@
   .card.SUN::before { background:linear-gradient(#ffd86b,#ff9f1c); }
   .badge.SUN { background:rgba(255,200,80,.16); color:#ffd27a; }
   .clouds { display:grid; grid-template-columns:repeat(24,1fr); align-items:end; gap:2px; height:32px; margin:6px 0 4px; }
+  .xcheck { width:100%; margin:12px 0 12px; padding:12px; border-radius:14px; border:1px solid var(--stroke); cursor:pointer;
+            background:rgba(255,255,255,.08); color:var(--text); font:600 15px -apple-system, system-ui, sans-serif;
+            display:flex; align-items:center; justify-content:center; gap:8px; }
+  .xcheck:active { transform:scale(.98); }
+  .xcheck .spinner { width:16px; height:16px; }
+  .xcheck.busy .spinner { display:block; }
+  .xres { display:grid; gap:8px; margin:-2px 0 12px; }
+  .xres:empty { display:none; }
+  .xr { display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border-radius:14px; background:rgba(255,255,255,.05); border:1px solid var(--stroke); }
+  .xr .ic { font-size:20px; line-height:1.2; }
+  .xr .nm { font-weight:700; font-size:15px; display:flex; gap:8px; align-items:center; }
+  .xr .dt { color:var(--muted); font-size:13px; margin-top:2px; line-height:1.4; }
+  .pill { font-size:11px; font-weight:800; letter-spacing:.4px; padding:3px 8px; border-radius:999px; }
+  .pill.pass { background:rgba(62,230,160,.16); color:var(--green); }
+  .pill.fail { background:rgba(255,94,98,.16); color:#ff9b9e; }
+  .pill.near { background:rgba(255,209,102,.16); color:var(--amber); }
+  .pill.na { background:rgba(255,255,255,.1); color:var(--muted); }
+  .xr.pass { border-color:rgba(62,230,160,.35); }
   .cap { font-size:12px; color:var(--faint); margin-top:12px; }
   details.hours { margin:10px 0 2px; }
   details.hours summary { background:rgba(255,255,255,.06); padding:10px 14px; border-radius:12px; font-size:14px; }
@@ -272,6 +290,7 @@ function hitCard(h, row) {
       <div class="odds"><small>Market says</small><b>${pct(h.yesPct)}</b><div class="no">No ${pct(h.noPct)}</div></div>
     </div>
     ${bar(low, high, h.forecast, h.unit)}
+    ${xbtn(h.slug, "temp")}
     <div class="meta">
       <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">Rounds to ${h.rounded}°, ${sign}</span></div>
       <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
@@ -352,6 +371,7 @@ function renderRain(data) {
     </div>
     ${strip(h.hours, h.start, h.end)}
     <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
+    ${xbtn(h.slug, "rain")}
     <div class="meta">
       <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">${h.rainyHours} rainy hrs · ${h.dayMm} mm all day</span></div>
       <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
@@ -402,6 +422,7 @@ function renderNight(data) {
     </div>
     ${spark(h.temps, +h.peakTime.slice(0, 2))}
     <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
+    ${xbtn(h.slug, "night")}
     <div class="meta">
       <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">${h.leading ? `Market favours ${esc(h.leading.label)} at ${pct(h.leading.yesPct)}` : ""}</span></div>
       <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
@@ -462,6 +483,7 @@ function renderSun(data) {
     ${cloudBars(h.clouds, h.daylight, lim)}
     <div class="strip-labels"><span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span></div>
     ${hourGrid(h.clouds, h.daylight, lim)}
+    ${xbtn(h.slug, "sun")}
     <div class="meta">
       <div>📍 ${esc(h.station)} · ${esc(h.stationName)}<br><span style="color:var(--faint)">${h.leading ? `Market favours ${esc(h.leading.label)} at ${pct(h.leading.yesPct)}` : ""}</span></div>
       <a href="${esc(h.url)}" target="_blank" rel="noopener">Open ↗</a>
@@ -478,6 +500,38 @@ function renderSun(data) {
     `<div class="skip">${esc(s.title)} – ${esc(s.reason)}</div>`).join("")}</details>`;
   $("out").innerHTML = html;
 }
+
+// ---------- Cross-check one hit against the other scans ----------
+const SCANS = { temp: ["🌡️", "Edge temp"], rain: ["🌧️", "Steady rain"], night: ["🌙", "Night high"], sun: ["☀️", "Sunny day"] };
+const xbtn = (slug, mode) => slug ? `<button class="xcheck" data-slug="${esc(slug)}" data-mode="${mode}"><span class="spinner"></span><span class="xl">🔍 Check other scans</span></button><div class="xres"></div>` : "";
+const PILL = { pass: "PASS", fail: "FAIL", near: "NEAR", na: "N/A" };
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest(".xcheck");
+  if (!b || b.disabled) return;
+  const box = b.nextElementSibling, from = b.dataset.mode;
+  b.disabled = true; b.classList.add("busy"); b.querySelector(".xl").textContent = "Checking…";
+  try {
+    const near = $("near").checked ? 1 : 0;
+    const r = await fetch(`/api/scan?mode=check&slug=${encodeURIComponent(b.dataset.slug)}&near=${near}&cloud=${$("cloud").value}&t=${Date.now()}`);
+    const body = await r.text();
+    let data; try { data = JSON.parse(body); } catch { throw new Error(`Server returned ${r.status}`); }
+    if (data.error) throw new Error(data.error);
+    const others = Object.keys(SCANS).filter(k => k !== from);
+    const passes = others.filter(k => data.checks[k]?.status === "pass").length;
+    box.innerHTML = others.map(k => {
+      const c = data.checks[k] || { status: "na", detail: "" };
+      return `<div class="xr ${c.status}"><div class="ic">${SCANS[k][0]}</div><div>
+        <div class="nm">${SCANS[k][1]} <span class="pill ${c.status}">${c.status === "pass" ? "✅ " : c.status === "fail" ? "❌ " : ""}${PILL[c.status] || c.status}</span></div>
+        <div class="dt">${esc(c.detail)}</div></div></div>`;
+    }).join("");
+    b.querySelector(".xl").textContent = `🔍 ${passes} of ${others.length} other scans pass`;
+  } catch (err) {
+    box.innerHTML = `<div class="error">Check failed: ${esc(err.message)}</div>`;
+    b.querySelector(".xl").textContent = "🔍 Check other scans";
+  }
+  b.disabled = false; b.classList.remove("busy");
+});
 
 async function runScan(btn) {
   const mode = btn.dataset.mode;
