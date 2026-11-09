@@ -15,7 +15,8 @@ export default async function handler(req, res) {
       const sub = body.subscription;
       if (!sub || !sub.endpoint || !sub.keys) return res.status(400).json({ error: "Missing subscription" });
       const id = subId(sub.endpoint);
-      await redis("HSET", "subs", id, JSON.stringify({ subscription: sub, near: !!body.near, since: new Date().toISOString() }));
+      const kinds = { high: body.kinds ? !!body.kinds.high : true, low: body.kinds ? !!body.kinds.low : false };
+      await redis("HSET", "subs", id, JSON.stringify({ subscription: sub, near: !!body.near, kinds, since: new Date().toISOString() }));
       return res.status(200).json({ ok: true, id });
     }
 

@@ -18,16 +18,19 @@ export default async function handler(req, res) {
     const subs = [];
     for (let i = 0; i < subsRaw.length; i += 2) subs.push({ id: subsRaw[i], ...JSON.parse(subsRaw[i + 1]) });
 
+    // Each phone chooses daily high and/or daily low alerts (older sign-ups = high only)
+    const wants = s => s.kinds || { high: true };
     const t0 = Date.now();
-    let hits = [];
-    if (subs.length) {
-      const events = await getTempEvents(t0);
-      hits = (await tempScan(events, t0, 1)).hits; // includes near misses; filtered per phone below
-    }
+    const hitsByKind = { high: [], low: [] };
+    await Promise.all(["high", "low"].filter(k => subs.some(s => wants(s)[k])).map(async k => {
+      const events = await getTempEvents(t0, k);
+      hitsByKind[k] = (await tempScan(events, t0, 1, k)).hits; // includes near misses; filtered per phone below
+    }));
+    const hits = [...hitsByKind.high, ...hitsByKind.low];
 
     let sent = 0, removed = 0;
     for (const s of subs) {
-      const mine = hits.filter(h => s.near || !h.nearMiss);
+      const mine = hits.filter(h => wants(s)[h.kind || "high"] && (s.near || !h.nearMiss));
       const fresh = [];
       for (const h of mine) {
         const key = `sent:${s.id}:${h.slug}:${h.bucket}:${h.nearMiss ? "n" : "h"}`;
@@ -35,13 +38,14 @@ export default async function handler(req, res) {
       }
       if (!fresh.length) continue;
       const fmtDay = d => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
-      const line = h => `${h.nearMiss ? "🟡" : "🟢"} ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit} → ${h.bucket} (${h.yesPct ?? "?"}%)${h.models && h.models.length ? ` · ${h.agree}/${h.models.length} models` : ""}`;
+      const line = h => `${h.nearMiss ? "🟡" : "🟢"} ${h.kind === "low" ? "Low" : "High"} · ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit} → ${h.bucket} (${h.yesPct ?? "?"}%)${h.models && h.models.length ? ` · ${h.agree}/${h.models.length} models` : ""}`;
       const title = fresh.length === 1
-        ? `🌡️ Edge hit: ${fresh[0].city}, ${fmtDay(fresh[0].date)}`
+        ? `🌡️ Edge ${fresh[0].kind === "low" ? "low" : "high"} hit: ${fresh[0].city}, ${fmtDay(fresh[0].date)}`
         : `🌡️ ${fresh.length} new Edge temp hits`;
+      const onlyLow = fresh.every(h => h.kind === "low");
       const body = fresh.slice(0, 4).map(line).join("\n") + (fresh.length > 4 ? `\n+${fresh.length - 4} more` : "");
       try {
-        const status = await sendPush(s.subscription, { title, body, url: "/?scan=temp", tag: "edge-temp-" + Date.now() });
+        const status = await sendPush(s.subscription, { title, body, url: onlyLow ? "/?scan=temp&kind=low" : "/?scan=temp", tag: "edge-temp-" + Date.now() });
         if (status === 404 || status === 410) { await redis("HDEL", "subs", s.id); removed++; }
         else if (status < 300) sent++;
       } catch {}

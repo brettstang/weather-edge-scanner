@@ -107,7 +107,8 @@ async function getJSON(url) {
   return r.json();
 }
 
-const isTempEvent = ev => /highest temperature in/i.test(ev.title || "");
+const KIND_RE = { high: /highest temperature in/i, low: /lowest temperature in/i };
+const kindOf = ev => KIND_RE.low.test(ev.title || "") ? "low" : "high";
 const MONTHS = ["january","february","march","april","may","june","july","august","september","october","november","december"];
 
 // Page through a Gamma list endpoint 100 at a time with no gaps, in parallel waves.
@@ -127,7 +128,8 @@ async function pageAll(base, maxPages, deadline) {
   return out;
 }
 
-export async function getTempEvents(t0) {
+export async function getTempEvents(t0, kind = "high") {
+  const isTempEvent = ev => KIND_RE[kind].test(ev.title || "");
   const found = new Map();
   const add = list => { for (const ev of list || []) if (ev && isTempEvent(ev) && !ev.closed) found.set(String(ev.id), ev); };
   const now = Date.now();
@@ -147,7 +149,7 @@ export async function getTempEvents(t0) {
   const have = new Set();
   for (const ev of found.values()) {
     have.add(ev.slug);
-    const m = (ev.slug || "").match(/^(highest-temperature-in-.+?)-on-[a-z]+-\d{1,2}(-\d{4})?$/);
+    const m = (ev.slug || "").match(/^((?:highest|lowest)-temperature-in-.+?)-on-[a-z]+-\d{1,2}(-\d{4})?$/);
     if (m) cities.set(m[1], !!m[2]);
   }
   const missing = [];
@@ -210,12 +212,13 @@ function yesPrice(m) {
 }
 
 const forecastCache = {};
-async function forecastHigh(lat, lon, unit, date) {
-  const key = `${lat},${lon},${unit}`;
+async function forecastHigh(lat, lon, unit, date, kind = "high") {
+  const v = kind === "low" ? "temperature_2m_min" : "temperature_2m_max";
+  const key = `${lat},${lon},${unit},${kind}`;
   if (!forecastCache[key]) {
     const u = unit === "C" ? "celsius" : "fahrenheit";
     forecastCache[key] = getJSON(
-      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max&temperature_unit=${u}&timezone=auto&past_days=1&forecast_days=16`
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=${v}&temperature_unit=${u}&timezone=auto&past_days=1&forecast_days=16`
     );
   }
   const data = await forecastCache[key];
@@ -223,7 +226,7 @@ async function forecastHigh(lat, lon, unit, date) {
   const i = d ? d.time.indexOf(date) : -1;
   // The station's local date right now, so finished days can be skipped.
   const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
-  return { value: i >= 0 ? d.temperature_2m_max[i] : null, localToday, offset: data.utc_offset_seconds || 0 };
+  return { value: i >= 0 ? d[v][i] : null, localToday, offset: data.utc_offset_seconds || 0 };
 }
 
 // ---------- Observed temperatures so far today (aviationweather.gov METARs) ----------
@@ -236,14 +239,15 @@ export function parseMetar(o) {
   let c = typeof o.temp === "number" ? o.temp : null;
   const t = rmk.match(/(?:^|\s)T([01])(\d{3})[01]\d{3}(?=\s|$)/);       // precise temp, e.g. T01560072 = 15.6°C
   if (t) c = signed(t[1], t[2]);
-  const m6 = rmk.match(/(?:^|\s)1([01])(\d{3})(?=\s|$)/);                // 6-hour max, e.g. 10178 = 17.8°C
   const time = typeof o.obsTime === "number" ? o.obsTime * 1000 : Date.parse(o.reportTime || o.obsTime);
-  return { time, c, max6: m6 ? signed(m6[1], m6[2]) : null };
+  // Polymarket settles on ROUTINE reports only (not SPECI specials)
+  const special = o.metarType === "SPECI" || /^SPECI\b/.test(raw);
+  return { time, c, special };
 }
 function stationObs(code) {
   if (!/^[A-Z]{4}$/.test(code)) return Promise.resolve(null);
   if (!obsCache[code]) obsCache[code] = getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=36`)
-    .then(list => (Array.isArray(list) ? list : []).map(parseMetar).filter(x => x.time && (x.c != null || x.max6 != null)))
+    .then(list => (Array.isArray(list) ? list : []).map(parseMetar).filter(x => x.time && x.c != null && !x.special))
     .catch(() => null);
   return obsCache[code];
 }
@@ -252,7 +256,8 @@ export function observedToday(obs, offsetSec, date, unit) {
   if (!obs || !obs.length) return null;
   const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
   const hourly = new Array(24).fill(null);
-  let max = null, maxHour = null, count = 0;
+  const low = new Array(24).fill(null);
+  let max = null, maxHour = null, min = null, minHour = null, count = 0;
   for (const o of obs) {
     const local = new Date(o.time + offsetSec * 1000);
     if (local.toISOString().slice(0, 10) !== date) continue;
@@ -260,14 +265,14 @@ export function observedToday(obs, offsetSec, date, unit) {
     if (o.c != null) {
       const v = conv(o.c); count++;
       if (hourly[hr] == null || v > hourly[hr]) hourly[hr] = v;
+      if (low[hr] == null || v < low[hr]) low[hr] = v;
       if (max == null || v > max) { max = v; maxHour = hr; }
+      if (min == null || v < min) { min = v; minHour = hr; }
     }
-    // A 6-hour max reported at 06:00 or later covers only today's hours
-    if (o.max6 != null && hr >= 6) { const v = conv(o.max6); if (max == null || v > max) { max = v; maxHour = hr; } }
   }
   if (max == null) return null;
   const nowHour = new Date(Date.now() + offsetSec * 1000).getUTCHours();
-  return { hourly, max: Math.round(max * 10) / 10, maxHour, nowHour, count };
+  return { hourly, low, max: Math.round(max * 10) / 10, maxHour, min: Math.round(min * 10) / 10, minHour, nowHour, count };
 }
 const hh = h => String(h).padStart(2, "0") + ":00";
 
@@ -312,7 +317,7 @@ async function rainScan(events, t0) {
     const st = code ? await lookupStation(code) : null;
     if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
     const date = parseDate(ev);
-    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
     let r;
     try { r = await rainDay(st[0], st[1], date); } catch { return; }
     if (date < r.localToday) { finished++; return; }
@@ -360,7 +365,12 @@ function leadingBucket(ev) {
   return best ? { label: best.label, yesPct: Math.round(best.p * 1000) / 10 } : null;
 }
 
-async function nightScan(events, t0) {
+// high: flag when the day's HIGH comes at night (21:00–05:00)
+// low:  flag when the day's LOW comes in the daytime (09:00–17:00)
+const WINDOW = { high: isNight, low: h => h >= 9 && h <= 17 };
+async function nightScan(events, t0, kind = "high") {
+  const inWin = WINDOW[kind], hi = kind !== "low";
+  const better = (a, b) => hi ? a > b : a < b;
   const hits = [], overview = [], skipped = [];
   let finished = 0, partial = false;
   const work = Promise.all(events.map(async ev => { try {
@@ -368,7 +378,7 @@ async function nightScan(events, t0) {
     const st = code ? await lookupStation(code) : null;
     if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
     const date = parseDate(ev);
-    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
     // Use the market's own unit
     let unit = "F";
     for (const m of ev.markets || []) { const lbl = m.groupItemTitle || m.question || ""; if (/°\s*C|celsius/i.test(lbl)) { unit = "C"; break; } if (/°\s*F/i.test(lbl)) break; }
@@ -386,25 +396,26 @@ async function nightScan(events, t0) {
       const ob = observedToday(await stationObs(code), data.utc_offset_seconds || 0, date, unit);
       if (ob) {
         for (let hr = 0; hr <= ob.nowHour; hr++) if (ob.hourly[hr] != null) {
-          temps[hr] = hr < ob.nowHour ? ob.hourly[hr] : Math.max(temps[hr] ?? -Infinity, ob.hourly[hr]);
+          const o = hi ? ob.hourly[hr] : ob.low[hr];
+          temps[hr] = hr < ob.nowHour ? o : (hi ? Math.max(temps[hr] ?? -Infinity, o) : Math.min(temps[hr] ?? Infinity, o));
         }
-        // A 6-hour max between readings can beat every hourly value
-        if (ob.maxHour != null && ob.max > Math.max(...temps.filter(v => v != null))) temps[ob.maxHour] = ob.max;
-        observed = { max: ob.max, at: hh(ob.maxHour), count: ob.count, nowHour: ob.nowHour };
+        observed = { value: hi ? ob.max : ob.min, at: hh(hi ? ob.maxHour : ob.minHour), count: ob.count, nowHour: ob.nowHour };
       }
     }
-    let peakHour = -1, peak = -Infinity, dayMax = -Infinity, dayHour = -1, nightMax = -Infinity;
+    // peak = the day's extreme (max for highs, min for lows); dayMax = the most extreme value OUTSIDE the window
+    const worst = hi ? -Infinity : Infinity;
+    let peakHour = -1, peak = worst, dayMax = worst, dayHour = -1, winExt = worst;
     temps.forEach((v, hr) => {
       if (v == null) return;
-      if (v > peak) { peak = v; peakHour = hr; }
-      if (isNight(hr)) nightMax = Math.max(nightMax, v);
-      else if (v > dayMax) { dayMax = v; dayHour = hr; }
+      if (better(v, peak)) { peak = v; peakHour = hr; }
+      if (inWin(hr)) { if (better(v, winExt)) winExt = v; }
+      else if (better(v, dayMax)) { dayMax = v; dayHour = hr; }
     });
-    const margin = Math.round((nightMax - dayMax) * 10) / 10;
+    const margin = Math.round((hi ? winExt - dayMax : dayMax - winExt) * 10) / 10;
     const row = {
       city, date, unit, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
       peak, peakTime: String(peakHour).padStart(2, "0") + ":00", dayMax, dayTime: String(dayHour).padStart(2, "0") + ":00",
-      margin, temps, leading: leadingBucket(ev), night: nightMax > dayMax,
+      margin, temps, leading: leadingBucket(ev), night: better(winExt, dayMax), kind,
       observed, locked: !!(observed && peakHour < observed.nowHour)
     };
     overview.push(row);
@@ -417,7 +428,7 @@ async function nightScan(events, t0) {
   // Biggest night-over-day margin first
   const byMargin = (a, b) => b.margin - a.margin || a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
   hits.sort(byMargin); overview.sort(byMargin);
-  return { mode: "night", hits, overview, skipped, finished, partial };
+  return { mode: "night", kind, hits, overview, skipped, finished, partial };
 }
 
 // ---------- Sunny day scan ----------
@@ -441,7 +452,7 @@ async function sunScan(events, t0, maxCloudLimit = SUN_MAX_CLOUD) {
     const st = code ? await lookupStation(code) : null;
     if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
     const date = parseDate(ev);
-    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
     let data;
     try { data = await skyData(st[0], st[1]); } catch { return; }
     const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
@@ -492,19 +503,20 @@ const MODELS = [
   ["jma_seamless", "JMA (Japan)"]
 ];
 const modelCache = {};
-function modelHighs(lat, lon, unit) {
-  const key = `${lat},${lon},${unit}`;
+function modelHighs(lat, lon, unit, kind = "high") {
+  const v = kind === "low" ? "temperature_2m_min" : "temperature_2m_max";
+  const key = `${lat},${lon},${unit},${kind}`;
   if (!modelCache[key]) modelCache[key] = Promise.all(MODELS.map(async ([id, name]) => {
     try {
-      const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&forecast_days=16&models=${id}`);
-      const k = Object.keys(d.daily || {}).find(x => x.startsWith("temperature_2m_max"));
+      const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=${v}&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&forecast_days=16&models=${id}`);
+      const k = Object.keys(d.daily || {}).find(x => x.startsWith(v));
       return k ? { id, name, time: d.daily.time, max: d.daily[k] } : null;
     } catch { return null; }
   }));
   return modelCache[key];
 }
 async function addModels(hit) {
-  const list = await modelHighs(hit.lat, hit.lon, hit.unit);
+  const list = await modelHighs(hit.lat, hit.lon, hit.unit, hit.kind);
   const models = [];
   for (const m of list) {
     if (!m) continue;
@@ -522,11 +534,14 @@ async function addModels(hit) {
 function settlementLink(ev) {
   const text = [ev.resolutionSource, ev.description, ...(ev.markets || []).flatMap(m => [m.resolutionSource, m.description])].filter(Boolean).join(" ");
   const m = text.match(/https?:\/\/(?:www\.)?wunderground\.com\/[^\s"')<]+/);
-  return m ? m[0].replace(/[.,;]+$/, "") : null;
+  if (m) return m[0].replace(/[.,;]+$/, "");
+  const code = findStation(ev);
+  return code && /^[A-Z]{4}$/.test(code) ? `https://aviationweather.gov/data/metar/?id=${code}&hours=24` : null;
 }
 
 // ---------- Edge temperature scan ----------
-export async function tempScan(events, t0, near = 0) {
+export async function tempScan(events, t0, near = 0, kind = "high") {
+  const hi = kind !== "low";
   const hits = [], skipped = [], overview = [];
   let finished = 0, partial = false;
   const work = Promise.all(events.map(async ev => { try {
@@ -534,7 +549,7 @@ export async function tempScan(events, t0, near = 0) {
     const st = code ? await lookupStation(code) : null;
     if (!st) { skipped.push({ title: ev.title, reason: code ? `Unknown station ${code}` : "No station in rules" }); return; }
     const date = parseDate(ev);
-    const city = (ev.title || "").replace(/.*highest temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+    const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
     const row = { city, date, station: code, stationName: st[2], unit: null, forecast: null, low: null, high: null,
                   url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug, hit: null };
     let isFinished = false;
@@ -544,7 +559,7 @@ export async function tempScan(events, t0, near = 0) {
       const b = parseBucket(label);
       if (!b) continue;
       let f;
-      try { f = await forecastHigh(st[0], st[1], b.unit, date); } catch { f = null; }
+      try { f = await forecastHigh(st[0], st[1], b.unit, date, kind); } catch { f = null; }
       if (f && date < f.localToday) { isFinished = true; break; }
       let fc = f ? f.value : null;
       if (fc == null) continue;
@@ -552,10 +567,11 @@ export async function tempScan(events, t0, near = 0) {
       let obsNow = null;
       if (f && date === f.localToday) {
         obsNow = observedToday(await stationObs(code), f.offset, date, b.unit);
-        if (obsNow) row.observed = { max: obsNow.max, at: hh(obsNow.maxHour), count: obsNow.count };
+        if (obsNow) row.observed = { value: hi ? obsNow.max : obsNow.min, at: hh(hi ? obsNow.maxHour : obsNow.minHour), count: obsNow.count };
       }
       const fcModel = fc;
-      if (obsNow && obsNow.max > fc) fc = obsNow.max;
+      // The day's high can't end below what's been recorded; the day's low can't end above it
+      if (obsNow) fc = hi ? Math.max(fc, obsNow.max) : Math.min(fc, obsNow.min);
       const p = yesPrice(m);
       const yesPct = p == null ? null : Math.round(p * 1000) / 10;
       row.unit = b.unit; row.forecast = fc;
@@ -570,7 +586,8 @@ export async function tempScan(events, t0, near = 0) {
           station: code, stationName: st[2], lat: st[0], lon: st[1],
           url: row.url, slug: ev.slug, nearMiss: past < 0, settle: settlementLink(ev),
           forecastModel: fcModel, observed: row.observed || null,
-          locked: !!(obsNow && b.side === "HIGH" && Math.round(obsNow.max) >= b.value)
+          kind, locked: !!(obsNow && (hi ? b.side === "HIGH" && Math.round(obsNow.max) >= b.value
+                                         : b.side === "LOW" && Math.round(obsNow.min) <= b.value))
         };
         hits.push(hit);
         if (!row.hit || (row.hit.nearMiss && !hit.nearMiss)) row.hit = hit;
@@ -592,7 +609,7 @@ export async function tempScan(events, t0, near = 0) {
   clearTimeout(t2);
   const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
   hits.sort(byDate); overview.sort(byDate);
-  return { mode: "temp", hits, overview, skipped, finished, partial };
+  return { mode: "temp", kind, hits, overview, skipped, finished, partial };
 }
 
 // ---------- Cross-check: run all four checks on one city/date ----------
@@ -602,7 +619,7 @@ async function checkOne(slug, near, cloud) {
   if (!ev) throw new Error("Market not found on Polymarket");
   const t0 = Date.now();
   const [t, r, n, s] = await Promise.all([
-    tempScan([ev], t0, near), rainScan([ev], t0), nightScan([ev], t0), sunScan([ev], t0, cloud)
+    tempScan([ev], t0, near, kindOf(ev)), rainScan([ev], t0), nightScan([ev], t0, kindOf(ev)), sunScan([ev], t0, cloud)
   ]);
   const fmt = v => Math.round(v * 10) / 10;
   const out = {};
@@ -617,12 +634,14 @@ async function checkOne(slug, near, cloud) {
   const N = n.overview[0];
   out.night = !N ? { status: "na", detail: "No forecast available" }
     : { status: N.night ? "pass" : "fail",
-        detail: `Peak ${fmt(N.peak)}°${N.unit} at ${N.peakTime} · night ${N.margin > 0 ? "+" : ""}${N.margin}° vs day` };
+        detail: N.kind === "low"
+          ? `Low ${fmt(N.peak)}°${N.unit} at ${N.peakTime} · daytime ${N.margin > 0 ? N.margin + "° colder" : Math.abs(N.margin) + "° warmer"} than other hours`
+          : `Peak ${fmt(N.peak)}°${N.unit} at ${N.peakTime} · night ${N.margin > 0 ? "+" : ""}${N.margin}° vs day` };
   const S = s.overview[0];
   out.sun = !S ? { status: "na", detail: "No forecast available" }
     : { status: S.clear ? "pass" : "fail",
         detail: `Max daylight cloud ${S.maxCloud}% (limit ${cloud}%)${S.dayRain > 0 ? ` · ${S.dayRain} mm rain` : ` · ${S.sunPct ?? "?"}% sunny`}` };
-  return { slug, checks: out };
+  return { slug, kind: kindOf(ev), checks: out };
 }
 
 // ---------- Detail: full card info for any one market (hit or not) ----------
@@ -630,7 +649,7 @@ async function detailOne(slug, near) {
   const found = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`);
   const ev = Array.isArray(found) ? found[0] : found;
   if (!ev) throw new Error("Market not found on Polymarket");
-  const t = await tempScan([ev], Date.now(), 999); // every edge bucket, with model check
+  const t = await tempScan([ev], Date.now(), 999, kindOf(ev)); // every edge bucket, with model check
   const row = t.overview[0];
   if (!row || !t.hits.length) throw new Error("No forecast available for this market");
   // Show the edge the forecast is closest to (or already inside)
@@ -658,12 +677,13 @@ export default async function handler(req, res) {
       if (!q.slug) return send(res, 400, { error: "Missing market" });
       return send(res, 200, await checkOne(String(q.slug), near, cloud));
     }
-    const events = await getTempEvents(t0);
+    const kind = q.kind === "low" ? "low" : "high";
+    const events = await getTempEvents(t0, kind);
     const out = mode === "rain" ? await rainScan(events, t0)
-      : mode === "night" ? await nightScan(events, t0)
+      : mode === "night" ? await nightScan(events, t0, kind)
       : mode === "sun" ? await sunScan(events, t0, cloud)
-      : await tempScan(events, t0, near);
-    return send(res, 200, { scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, ms: Date.now() - t0 });
+      : await tempScan(events, t0, near, kind);
+    return send(res, 200, { scannedAt: new Date().toISOString(), marketsFound: events.length, ...out, kind, ms: Date.now() - t0 });
   } catch (e) {
     return send(res, 500, { error: String(e && e.message || e) });
   }
