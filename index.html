@@ -112,6 +112,9 @@
          background:rgba(94,200,255,.08); border:1px solid rgba(94,200,255,.25); font-size:13px; line-height:1.4; color:#cfe9ff; }
   .obs b { color:#fff; }
   .badge.LOCK { background:rgba(62,230,160,.18); color:var(--green); }
+  .lt { display:inline-block; white-space:nowrap; margin-top:6px; padding:4px 10px; border-radius:999px; font-size:12px;
+        background:rgba(255,255,255,.08); color:#dfe4ff; border:1px solid var(--stroke); font-variant-numeric:tabular-nums; }
+  .row .lt { margin:4px 0 0; padding:2px 8px; font-size:11px; }
   .cap { font-size:12px; color:var(--faint); margin-top:12px; }
   details.hours { margin:10px 0 2px; }
   details.hours summary { background:rgba(255,255,255,.06); padding:10px 14px; border-radius:12px; font-size:14px; }
@@ -331,6 +334,15 @@ function linkRow(h) {
   </div>`;
 }
 
+// Live local date & time for a city (IANA timezone from Open-Meteo)
+function fmtLocal(tz) {
+  try {
+    return new Intl.DateTimeFormat(undefined, { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date());
+  } catch { return ""; }
+}
+const lt = tz => tz ? `<div class="lt" data-tz="${esc(tz)}">🕒 Local now: <span>${esc(fmtLocal(tz))}</span></div>` : "";
+setInterval(() => document.querySelectorAll(".lt[data-tz]").forEach(el => { el.querySelector("span").textContent = fmtLocal(el.dataset.tz); }), 20000);
+
 function obsLine(o, unit, extra, k = kind) {
   if (!o) return "";
   return `<div class="obs">📡<div>Observed ${k === "low" ? "low" : "high"} so far today: <b>${Math.round(o.value * 10) / 10}°${unit}</b> at ${esc(o.at)}
@@ -347,7 +359,7 @@ function hitCard(h, row) {
   const high = row?.high?.threshold ?? (h.side === "HIGH" ? h.threshold : null);
   return `<div class="card ${h.side} ${h.nearMiss ? "near" : ""}">
     <div class="top">
-      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)} · ${esc(h.bucket)}</div></div>
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)} · ${esc(h.bucket)}</div>${lt(h.tz)}</div>
       ${badge}
     </div>
     <div class="nums">
@@ -394,6 +406,7 @@ function render(data) {
     html += `<div class="section">Every market</div><details><summary>All markets (${overview.length})</summary>${overview.map(o => `
       <div class="row tap" data-slug="${esc(o.slug || "")}">
         <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)} <em class="chev">›</em></span></div>
+        ${lt(o.tz)}
         ${bar(o.low?.threshold ?? null, o.high?.threshold ?? null, o.forecast, o.unit)}
         <div class="edges">
           <span style="color:var(--cold)">${o.low ? `≤${o.low.threshold}° · ${pct(o.low.yesPct)}` : "–"}</span>
@@ -433,7 +446,7 @@ function renderRain(data) {
   if (!data.hits.length) html += `<div class="card empty"><div>☀️</div>No city has 3+ rainy hours in a row on any open day.</div>`;
   html += data.hits.map(h => `<div class="card RAIN">
     <div class="top">
-      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div></div>
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div>${lt(h.tz)}</div>
       <span class="badge RAIN">🌧 STEADY RAIN</span>
     </div>
     <div class="nums">
@@ -451,6 +464,7 @@ function renderRain(data) {
   if (ov.length) html += `<div class="section">Every day</div><details><summary>All days (${ov.length})</summary>${ov.map(o => `
     <div class="row">
       <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      ${lt(o.tz)}
       ${strip(o.hours, o.start, o.end)}
       <div class="edges" style="margin-top:4px !important"><span>${o.longest ? `Longest ${o.longest} hr${o.longest > 1 ? "s" : ""}` : "No rainy hours"}</span><span>${o.dayMm} mm</span></div>
     </div>`).join("")}</details>`;
@@ -485,7 +499,7 @@ function renderNight(data) {
   if (!data.hits.length) html += `<div class="card empty"><div>🌤️</div>Every open day peaks in the daytime right now.</div>`;
   html += data.hits.map(h => `<div class="card NIGHT">
     <div class="top">
-      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div></div>
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div>${lt(h.tz)}</div>
       <span class="badge NIGHT">🌙 NIGHT HIGH</span>
     </div>
     <div class="nums">
@@ -504,6 +518,7 @@ function renderNight(data) {
   if (ov.length) html += `<div class="section">Every day</div><details><summary>All days (${ov.length})</summary>${ov.map(o => `
     <div class="row">
       <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      ${lt(o.tz)}
       ${spark(o.temps, +o.peakTime.slice(0, 2))}
       <div class="edges" style="margin-top:4px !important"><span>Peak ${fmt(o.peak)}°${o.unit} at ${esc(o.peakTime)}</span><span style="color:${o.night ? "#cdb6ff" : "var(--muted)"}">${o.margin > 0 ? "+" : ""}${o.margin}° night vs day</span></div>
     </div>`).join("")}</details>`;
@@ -545,7 +560,7 @@ function renderSun(data) {
   if (!data.hits.length) html += `<div class="card empty"><div>⛅</div>No open day stays at or under ${lim}% cloud from sunrise to sunset. Try raising the cloud limit.</div>`;
   html += data.hits.map(h => `<div class="card SUN">
     <div class="top">
-      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div></div>
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div>${lt(h.tz)}</div>
       <span class="badge SUN">☀️ ${h.maxCloud === 0 ? "CLOUDLESS" : "SUNNY"}</span>
     </div>
     <div class="nums">
@@ -565,6 +580,7 @@ function renderSun(data) {
   if (ov.length) html += `<div class="section">Every day</div><details><summary>All days (${ov.length})</summary>${ov.map(o => `
     <div class="row">
       <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      ${lt(o.tz)}
       ${cloudBars(o.clouds, o.daylight, lim)}
       <div class="edges" style="margin-top:4px !important"><span>Max cloud ${o.maxCloud}% · avg ${o.avgCloud}%</span><span style="color:${o.clear ? "#ffd27a" : "var(--muted)"}">${o.dayRain > 0 ? `${o.dayRain} mm rain` : `${o.sunPct ?? "?"}% sunny`}</span></div>
       ${hourGrid(o.clouds, o.daylight, lim)}
@@ -646,7 +662,7 @@ function renderDayLow(data) {
   if (!data.hits.length) html += `<div class="card empty"><div>🌙</div>Every open day bottoms out overnight right now.</div>`;
   html += data.hits.map(h => `<div class="card NIGHT">
     <div class="top">
-      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div></div>
+      <div><div class="city">${esc(h.city)}</div><div class="date">${fmtDate(h.date)}</div>${lt(h.tz)}</div>
       <span class="badge NIGHT">🌤️ DAY LOW</span>
     </div>
     <div class="nums">
@@ -665,6 +681,7 @@ function renderDayLow(data) {
   if (ov.length) html += `<div class="section">Every day</div><details><summary>All days (${ov.length})</summary>${ov.map(o => `
     <div class="row">
       <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)}</span></div>
+      ${lt(o.tz)}
       ${spark(o.temps, +o.peakTime.slice(0, 2), "low")}
       <div class="edges" style="margin-top:4px !important"><span>Low ${fmt(o.peak)}°${o.unit} at ${esc(o.peakTime)}</span><span style="color:${o.night ? "#cdb6ff" : "var(--muted)"}">${o.margin > 0 ? `${o.margin}° colder by day` : `${Math.abs(o.margin)}° colder at night`}</span></div>
     </div>`).join("")}</details>`;

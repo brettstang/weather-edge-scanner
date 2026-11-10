@@ -226,7 +226,7 @@ async function forecastHigh(lat, lon, unit, date, kind = "high") {
   const i = d ? d.time.indexOf(date) : -1;
   // The station's local date right now, so finished days can be skipped.
   const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
-  return { value: i >= 0 ? d[v][i] : null, localToday, offset: data.utc_offset_seconds || 0 };
+  return { value: i >= 0 ? d[v][i] : null, localToday, offset: data.utc_offset_seconds || 0, tz: data.timezone || null };
 }
 
 // ---------- Observed temperatures so far today (aviationweather.gov METARs) ----------
@@ -289,7 +289,7 @@ async function rainDay(lat, lon, date) {
   const data = await rainCache[key];
   const localToday = new Date(Date.now() + (data.utc_offset_seconds || 0) * 1000).toISOString().slice(0, 10);
   const h = data.hourly;
-  if (!h) return { localToday, hours: null };
+  if (!h) return { localToday, tz: data.timezone || null, hours: null };
   const hours = [];
   for (let i = 0; i < h.time.length; i++) if (h.time[i].startsWith(date)) {
     const mm = h.precipitation[i], prob = h.precipitation_probability ? h.precipitation_probability[i] : null;
@@ -306,7 +306,7 @@ async function rainDay(lat, lon, date) {
   }
   const dayMm = hours.reduce((a, x) => a + (x.mm || 0), 0);
   const rainyHours = hours.filter(x => x.rainy).length;
-  return { localToday, hours: hours.map(x => (x.rainy ? 1 : 0)), streak: best, dayMm, rainyHours };
+  return { localToday, tz: data.timezone || null, hours: hours.map(x => (x.rainy ? 1 : 0)), streak: best, dayMm, rainyHours };
 }
 
 async function rainScan(events, t0) {
@@ -326,7 +326,7 @@ async function rainScan(events, t0) {
       city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
       longest: r.streak ? r.streak.len : 0, start: r.streak?.start ?? null, end: r.streak?.end ?? null,
       streakMm: r.streak ? Math.round(r.streak.mm * 10) / 10 : 0, maxProb: r.streak?.maxProb ?? null,
-      dayMm: Math.round(r.dayMm * 10) / 10, rainyHours: r.rainyHours, hours: r.hours
+      dayMm: Math.round(r.dayMm * 10) / 10, rainyHours: r.rainyHours, hours: r.hours, tz: r.tz
     };
     overview.push(row);
     if (row.longest >= RAIN_STREAK) hits.push(row);
@@ -416,7 +416,7 @@ async function nightScan(events, t0, kind = "high") {
       city, date, unit, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
       peak, peakTime: String(peakHour).padStart(2, "0") + ":00", dayMax, dayTime: String(dayHour).padStart(2, "0") + ":00",
       margin, temps, leading: leadingBucket(ev), night: better(winExt, dayMax), kind,
-      observed, locked: !!(observed && peakHour < observed.nowHour)
+      observed, locked: !!(observed && peakHour < observed.nowHour), tz: data.timezone || null
     };
     overview.push(row);
     if (row.night) hits.push(row);
@@ -475,7 +475,7 @@ async function sunScan(events, t0, maxCloudLimit = SUN_MAX_CLOUD) {
     const sunPct = d.daylight_duration && d.daylight_duration[di] ? Math.round((d.sunshine_duration[di] / d.daylight_duration[di]) * 100) : null;
     const row = {
       city, date, station: code, stationName: st[2], url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug,
-      sunrise, sunset, maxCloud, avgCloud, dayRain, sunPct, clouds, daylight, leading: leadingBucket(ev),
+      sunrise, sunset, maxCloud, avgCloud, dayRain, sunPct, clouds, daylight, leading: leadingBucket(ev), tz: data.timezone || null,
       clear: maxCloud <= maxCloudLimit && dayRain === 0
     };
     overview.push(row);
@@ -563,6 +563,7 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
       if (f && date < f.localToday) { isFinished = true; break; }
       let fc = f ? f.value : null;
       if (fc == null) continue;
+      row.tz = f.tz;
       // Today: the high can't end up below what the airport has already recorded
       let obsNow = null;
       if (f && date === f.localToday) {
@@ -585,7 +586,7 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
           yesPct, noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
           station: code, stationName: st[2], lat: st[0], lon: st[1],
           url: row.url, slug: ev.slug, nearMiss: past < 0, settle: settlementLink(ev),
-          forecastModel: fcModel, observed: row.observed || null,
+          forecastModel: fcModel, observed: row.observed || null, tz: f.tz,
           kind, locked: !!(obsNow && (hi ? b.side === "HIGH" && Math.round(obsNow.max) >= b.value
                                          : b.side === "LOW" && Math.round(obsNow.min) <= b.value))
         };
