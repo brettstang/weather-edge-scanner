@@ -244,12 +244,13 @@ export function parseMetar(o) {
   const special = o.metarType === "SPECI" || /^SPECI\b/.test(raw);
   return { time, c, special };
 }
-function stationObs(code) {
+function stationObs(code, hours = 36) {
   if (!/^[A-Z]{4}$/.test(code)) return Promise.resolve(null);
-  if (!obsCache[code]) obsCache[code] = getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=36`)
+  const ck = `${code},${hours}`;
+  if (!obsCache[ck]) obsCache[ck] = getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=${hours}`)
     .then(list => (Array.isArray(list) ? list : []).map(parseMetar).filter(x => x.time && x.c != null && !x.special))
     .catch(() => null);
-  return obsCache[code];
+  return obsCache[ck];
 }
 // Summarise today's observations in the station's local time and the market's unit.
 export function observedToday(obs, offsetSec, date, unit) {
@@ -662,18 +663,28 @@ async function detailOne(slug, near) {
 
 // ---------- Day graph: hourly forecast + real airport readings for one market's day ----------
 const modelHourlyCache = {};
-function modelHourly(lat, lon, unit) {
-  const key = `${lat},${lon},${unit}`;
+function modelHourly(lat, lon, unit, pastDays = 1) {
+  const key = `${lat},${lon},${unit},${pastDays}`;
   if (!modelHourlyCache[key]) modelHourlyCache[key] = Promise.all(MODELS.map(async ([id, name]) => {
     try {
-      const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&past_days=1&forecast_days=16&models=${id}`);
+      const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&past_days=${pastDays}&forecast_days=16&models=${id}`);
       const k = Object.keys(d.hourly || {}).find(x => x.startsWith("temperature_2m"));
       return k ? { id, name, time: d.hourly.time, temp: d.hourly[k] } : null;
     } catch { return null; }
   }));
   return modelHourlyCache[key];
 }
-async function graphOne(slug) {
+const blendCache = {};
+function blendHourly(lat, lon, unit, pastDays) {
+  const key = `${lat},${lon},${unit},${pastDays}`;
+  if (!blendCache[key]) blendCache[key] = getJSON(
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&past_days=${pastDays}&forecast_days=16`);
+  return blendCache[key];
+}
+const addDays = (date, n) => new Date(Date.parse(date + "T12:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+
+async function graphOne(slug, days = 1) {
+  days = Math.min(4, Math.max(1, days | 0));
   const found = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`);
   const ev = Array.isArray(found) ? found[0] : found;
   if (!ev) throw new Error("Market not found on Polymarket");
@@ -689,33 +700,45 @@ async function graphOne(slug) {
     unit = b.unit;
     if (b.side === "LOW") lowEdge = b.value; else highEdge = b.value;
   }
-  const [data, mh] = await Promise.all([hourlyTemps(st[0], st[1], unit), modelHourly(st[0], st[1], unit)]);
+  const past = days > 1 ? 5 : 1;
+  const [data, mh] = await Promise.all([
+    days > 1 ? blendHourly(st[0], st[1], unit, past) : hourlyTemps(st[0], st[1], unit),
+    modelHourly(st[0], st[1], unit, past)
+  ]);
   const off = data.utc_offset_seconds || 0;
+  const dates = Array.from({ length: days }, (_, i) => addDays(date, i - (days - 1)));
+  // minute offset from local midnight of the first day in the range
+  const toM = t => { const i = dates.indexOf(t.slice(0, 10)); return i < 0 ? null : i * 1440 + +t.slice(11, 13) * 60 + +t.slice(14, 16); };
   const models = [];
   for (const m of mh) {
     if (!m) continue;
     const points = [];
-    for (let i = 0; i < m.time.length; i++) if (m.time[i].startsWith(date) && m.temp[i] != null) points.push({ m: +m.time[i].slice(11, 13) * 60, v: m.temp[i] });
+    for (let i = 0; i < m.time.length; i++) { const mm = toM(m.time[i]); if (mm != null && m.temp[i] != null) points.push({ m: mm, v: m.temp[i] }); }
     if (points.length) models.push({ id: m.id, name: m.name, points });
   }
   const forecast = [];
-  for (let i = 0; i < (data.hourly?.time || []).length; i++)
-    if (data.hourly.time[i].startsWith(date)) forecast.push({ m: +data.hourly.time[i].slice(11, 13) * 60, v: data.hourly.temperature_2m[i] });
+  for (let i = 0; i < (data.hourly?.time || []).length; i++) {
+    const mm = toM(data.hourly.time[i]);
+    if (mm != null && data.hourly.temperature_2m[i] != null) forecast.push({ m: mm, v: data.hourly.temperature_2m[i] });
+  }
   const localNow = new Date(Date.now() + off * 1000);
-  const localToday = localNow.toISOString().slice(0, 10);
-  const nowMin = date === localToday ? localNow.getUTCHours() * 60 + localNow.getUTCMinutes() : date < localToday ? 1440 : null;
+  const nowIso = localNow.toISOString();
+  const nowIdx = dates.indexOf(nowIso.slice(0, 10));
+  const nowMin = nowIdx >= 0 ? nowIdx * 1440 + localNow.getUTCHours() * 60 + localNow.getUTCMinutes()
+               : nowIso.slice(0, 10) > dates[dates.length - 1] ? days * 1440 : null;
   const observed = [];
-  if (nowMin != null) {
+  if (nowMin != null || nowIso.slice(0, 10) >= dates[0]) {
     const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
-    for (const o of (await stationObs(code)) || []) {
-      const local = new Date(o.time + off * 1000);
-      if (local.toISOString().slice(0, 10) !== date) continue;
-      observed.push({ m: local.getUTCHours() * 60 + local.getUTCMinutes(), v: Math.round(conv(o.c) * 10) / 10 });
+    for (const o of (await stationObs(code, days > 1 ? 120 : 36)) || []) {
+      const local = new Date(o.time + off * 1000).toISOString();
+      const mm = toM(local.slice(0, 16));
+      if (mm == null) continue;
+      observed.push({ m: mm, v: Math.round(conv(o.c) * 10) / 10 });
     }
     observed.sort((a, b) => a.m - b.m);
   }
   const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
-  return { city, date, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, models, observed, nowMin, lowEdge, highEdge };
+  return { city, date, dates, days, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, models, observed, nowMin, lowEdge, highEdge };
 }
 
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
@@ -730,7 +753,7 @@ export default async function handler(req, res) {
   try {
     if (mode === "graph") {
       if (!q.slug) return send(res, 400, { error: "Missing market" });
-      return send(res, 200, await graphOne(String(q.slug)));
+      return send(res, 200, await graphOne(String(q.slug), parseInt(q.days, 10) || 1));
     }
     if (mode === "detail") {
       if (!q.slug) return send(res, 400, { error: "Missing market" });
