@@ -142,6 +142,27 @@
             background:rgba(255,255,255,.08); color:var(--text); font:600 14px -apple-system, system-ui, sans-serif; }
   .gleg2 .li small.miss { display:block; font-size:10.5px; color:var(--faint); font-weight:600; margin-top:1px; }
   .gleg2 .li small.miss.best { color:var(--green); }
+  .gbox { position:relative; }
+  .gexp { position:absolute; top:6px; right:6px; z-index:2; border:1px solid var(--stroke); background:rgba(20,22,43,.8); color:#fff;
+          font:600 12px -apple-system, system-ui, sans-serif; padding:5px 9px; border-radius:999px; cursor:pointer; }
+  .gbox .gsum { padding:0 70px; }
+  body.fs-open { overflow:hidden; }
+  .fs { position:fixed; inset:0; z-index:1000; background:#0b1026; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  .fs .fsbox { flex:none; margin:0; border:0; border-radius:0; padding:calc(env(safe-area-inset-top) + 8px) calc(env(safe-area-inset-right) + 12px) 8px calc(env(safe-area-inset-left) + 12px);
+               background:linear-gradient(180deg,#0b1026,#1b1f4a); box-sizing:border-box; }
+  .fs.rot .fsbox { transform:rotate(90deg); padding:12px 16px; }
+  .fsl { display:flex; gap:14px; height:100%; }
+  .fsc { flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center; }
+  .fsc .gsum { padding:0 36px 0 0; text-align:left; }
+  .fsc svg { max-height:calc(100% - 28px); }
+  .fsp { width:min(260px, 34%); flex:none; overflow-y:auto; -webkit-overflow-scrolling:touch; padding-right:2px; }
+  .fsp .gleg2 { grid-template-columns:1fr 1fr; }
+  .fsp .readout { margin-top:0; }
+  .fsp { padding-top:44px; }
+  .fsp .mw { display:none; }
+  .fsx { position:absolute; top:10px; right:12px; z-index:3; width:34px; height:34px; border-radius:50%; border:1px solid var(--stroke);
+         background:rgba(255,255,255,.12); color:#fff; font-size:16px; cursor:pointer; }
+  .fs:not(.rot) .fsx { top:calc(env(safe-area-inset-top) + 8px); right:calc(env(safe-area-inset-right) + 10px); }
   .glh { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin:10px 2px 2px; }
   .gtip { text-align:center; font-size:11px; color:var(--faint); margin-top:8px; }
   .gsum { text-align:center; font-size:13px; color:#dfe4ff; margin:2px 0 6px; }
@@ -628,8 +649,8 @@ const MODEL_COLORS = {
 };
 const shortDay = d => { const t = new Date(d + "T12:00:00Z"); return ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][t.getUTCDay()] + " " + t.getUTCDate(); };
 const SHORT = { ecmwf_ifs025: "ECMWF", gfs_seamless: "GFS", gem_seamless: "GEM", icon_seamless: "ICON", ukmo_seamless: "UKMO", meteofrance_seamless: "Météo-Fr", jma_seamless: "JMA" };
-function dayGraph(g) {
-  const W = 340, H = 230, L = 34, R = 10, T = 14, B = 26;
+function dayGraph(g, opt = {}) {
+  const W = opt.W || 340, H = opt.H || 230, L = 34, R = 10, T = 14, B = 26;
   const models = g.models || [];
   const pts = [...g.forecast.map(p => p.v), ...g.observed.map(p => p.v), ...models.flatMap(m => m.points.map(p => p.v))];
   if (!pts.length) return `<div class="gsum">No hourly data for this day yet.</div>`;
@@ -685,9 +706,8 @@ function dayGraph(g) {
     ...models.map(m => ({ key: m.id, name: SHORT[m.id] || m.name, color: MODEL_COLORS[m.id] || "#aaa", val: extOf(onDay(m.points))?.v, miss: miss[m.id] }))
   ];
   const best = Object.entries(miss).sort((a, b) => a[1].avg - b[1].avg)[0];
-  return `
-    <div class="gsum">${esc(g.city)} · ${days > 1 ? `${esc(dayName(g.dates[0]))} – ${fmtDate(g.date)}` : fmtDate(g.date)} · ${esc(g.station)}${ext ? ` · ${g.observed.includes(ext) ? "recorded" : "expected"} ${word} <b>${r1(ext.v)}°${g.unit}</b> at ${hhmm(ext.m)}` : ""}</div>
-    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Temperature graph by model" data-gid="${gid}" style="touch-action:none">
+  const gsumHtml = `<div class="gsum">${esc(g.city)} · ${days > 1 ? `${esc(dayName(g.dates[0]))} – ${fmtDate(g.date)}` : fmtDate(g.date)} · ${esc(g.station)}${ext ? ` · ${g.observed.includes(ext) ? "recorded" : "expected"} ${word} <b>${r1(ext.v)}°${g.unit}</b> at ${hhmm(ext.m)}` : ""}</div>`;
+  const svgHtml = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Temperature graph by model" data-gid="${gid}" style="touch-action:none">
       ${grid}${hrs}
       ${edgeLine(g.lowEdge, "#5ec8ff", `≤${g.lowEdge}° edge`)}${edgeLine(g.highEdge, "#ff9f43", `≥${g.highEdge}° edge`)}
       ${now != null && now < span ? `<rect x="${L}" y="${T}" width="${Math.max(0, x(now) - L)}" height="${H - T - B}" fill="rgba(255,255,255,.035)"/>
@@ -702,16 +722,23 @@ function dayGraph(g) {
       ${ext ? `<circle cx="${x(ext.m)}" cy="${y(ext.v)}" r="5.5" fill="none" stroke="#ffd166" stroke-width="2"/>` : ""}
       <g class="xh"></g>
       <rect class="hitarea" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>
-    </svg>
+    </svg>`;
+  const restHtml = `
     <div class="readout">Tap or drag on the graph to read temperatures by hour.</div>
     <div class="glh">${days > 1 ? `${esc(dayName(g.date))} ${word} by source · ±° = avg miss vs airport, past days` : `Day's ${word} by source${g.observed.length ? " · Airport = recorded so far" : ""}`}</div>
     <div class="gleg2">${legend.map(l => `
       <button class="li" data-key="${l.key}"><i style="background:${l.color}${l.dash ? ";background-image:repeating-linear-gradient(90deg,transparent 0 3px,#14162b 3px 5px)" : ""}"></i>
-        <span>${esc(l.name)}${l.miss ? `<small class="miss${best && best[0] === l.key ? " best" : ""}">${best && best[0] === l.key ? "★ " : ""}±${l.miss.avg.toFixed(1)}° miss</small>` : ""}</span><b>${l.val != null ? `${r1(l.val)}°` : ""}</b></button>`).join("")}
+        <span>${esc(l.name)}${l.miss ? `<small class="miss${best && best[0] === l.key ? " best" : ""}">${best && best[0] === l.key ? "★ " : ""}±${l.miss.avg.toFixed(1)}°<span class="mw"> miss</span></small>` : ""}</span><b>${l.val != null ? `${r1(l.val)}°` : ""}</b></button>`).join("")}
     </div>
     <div class="gtip">Tap a name to highlight its line. Shaded area = hours already passed.</div>
     <button class="grange" data-days="${days > 1 ? 1 : 4}">${days > 1 ? "📅 Show just this day" : "🗓️ Show past 3 days"}</button>
     ${days > 1 && best ? `<div class="gtip">Most accurate here over the past days: <b style="color:${colorOf(best[0])}">${esc(best[0] === "blend" ? "Blend" : SHORT[best[0]] || best[0])}</b> (±${best[1].avg.toFixed(1)}° on the daily ${word}). Past hours use each model's latest run, so real multi-day forecasts miss by more.</div>` : ""}`;
+  if (opt.fs) return `
+    <div class="fsl">
+      <div class="fsc">${gsumHtml}${svgHtml}</div>
+      <div class="fsp">${restHtml}</div>
+    </div>`;
+  return `<button class="gexp" aria-label="Expand graph">⤢ Expand</button>${gsumHtml}${svgHtml}${restHtml}`;
 }
 
 // ---------- Interactive graph: highlight a source, read values by hour ----------
@@ -774,14 +801,51 @@ function drawCrosshair(box, minute) {
   }
   box.dataset.min = minute;
 }
-function pointerToMinute(svg, clientX) {
+function pointerToMinute(svg, clientX, clientY) {
   const G = GRAPHS[svg.dataset.gid];
   const rect = svg.getBoundingClientRect();
-  const sx = (clientX - rect.left) / rect.width * G.W;
+  const rotated = !!svg.closest(".fs.rot");
+  // When the full-screen view is drawn sideways, the chart's x-axis runs top → bottom on screen
+  const sx = rotated ? (clientY - rect.top) / rect.height * G.W : (clientX - rect.left) / rect.width * G.W;
   const frac = Math.min(1, Math.max(0, (sx - G.L) / (G.W - G.L - G.R)));
   const days = G.g.days || 1;
   return Math.min(24 * days - 1, Math.round(frac * 24 * days)) * 60;
 }
+// ---------- Full-screen (sideways) graph ----------
+function fsSize() {
+  const vw = innerWidth, vh = innerHeight, rot = vh > vw;      // portrait → draw it sideways
+  const long = Math.max(vw, vh), short = Math.min(vw, vh);
+  const panel = Math.min(260, Math.round(long * 0.34));
+  const cw = long - panel - 40, ch = short - 70;               // chart area in landscape terms
+  return { rot, long, short, W: 640, H: Math.max(220, Math.round(640 * ch / cw)) };
+}
+function renderFS(box) {
+  const fs = box.closest(".fs"), z = fsSize();
+  fs.classList.toggle("rot", z.rot);
+  box.style.width = z.long + "px"; box.style.height = z.short + "px";
+  box.innerHTML = `<button class="fsx" aria-label="Close">✕</button>` + dayGraph(box._g, { fs: true, W: z.W, H: z.H });
+  applyHighlight(box);
+}
+function openFS(src) {
+  const fs = document.createElement("div");
+  fs.className = "fs";
+  fs.innerHTML = `<div class="gbox fsbox"></div>`;
+  const box = fs.firstChild;
+  box._g = src._g; box.dataset.slug = src.dataset.slug; box.dataset.sel = src.dataset.sel || "";
+  if (src.dataset.min) box.dataset.min = src.dataset.min;
+  document.body.appendChild(fs);
+  document.body.classList.add("fs-open");
+  renderFS(box);
+  const onResize = () => { if (document.body.contains(fs)) renderFS(box); else removeEventListener("resize", onResize); };
+  addEventListener("resize", onResize);
+}
+document.addEventListener("click", e => {
+  const ex = e.target.closest(".gexp");
+  if (ex) { const box = ex.closest(".gbox"); if (box && box._g) openFS(box); return; }
+  const x = e.target.closest(".fsx");
+  if (x) { x.closest(".fs").remove(); document.body.classList.remove("fs-open"); }
+});
+
 // Range button: past 3 days + market day, or just the market day
 document.addEventListener("click", async e => {
   const b = e.target.closest(".grange");
@@ -794,7 +858,8 @@ document.addEventListener("click", async e => {
     let g; try { g = JSON.parse(body); } catch { throw new Error(`Server returned ${r.status}`); }
     if (g.error) throw new Error(g.error);
     delete box.dataset.min;
-    box.innerHTML = dayGraph(g);
+    box._g = g;
+    if (box.classList.contains("fsbox")) renderFS(box); else box.innerHTML = dayGraph(g);
     applyHighlight(box);
   } catch (err) {
     b.disabled = false; b.textContent = "Couldn't load: " + err.message;
@@ -819,7 +884,7 @@ document.addEventListener("pointerdown", e => {
   const svg = e.target.closest && e.target.closest("svg[data-gid]");
   if (!svg) return;
   const box = svg.closest(".gbox");
-  const move = ev => drawCrosshair(box, pointerToMinute(svg, ev.clientX));
+  const move = ev => drawCrosshair(box, pointerToMinute(svg, ev.clientX, ev.clientY));
   move(e);
   try { svg.setPointerCapture(e.pointerId); } catch {}
   const up = () => { svg.removeEventListener("pointermove", move); svg.removeEventListener("pointerup", up); svg.removeEventListener("pointercancel", up); };
@@ -840,6 +905,7 @@ document.addEventListener("click", async e => {
     let g; try { g = JSON.parse(body); } catch { throw new Error(`Server returned ${r.status}`); }
     if (g.error) throw new Error(g.error);
     box.dataset.slug = b.dataset.slug;
+    box._g = g;
     box.innerHTML = dayGraph(g);
     applyHighlight(box);
     b.textContent = "📈 Hide graph";
