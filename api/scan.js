@@ -660,6 +660,45 @@ async function detailOne(slug, near) {
   return { hit: h, row };
 }
 
+// ---------- Day graph: hourly forecast + real airport readings for one market's day ----------
+async function graphOne(slug) {
+  const found = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`);
+  const ev = Array.isArray(found) ? found[0] : found;
+  if (!ev) throw new Error("Market not found on Polymarket");
+  const kind = kindOf(ev);
+  const code = findStation(ev);
+  const st = code ? await lookupStation(code) : null;
+  if (!st) throw new Error("No settlement station in this market's rules");
+  const date = parseDate(ev);
+  let unit = "F", lowEdge = null, highEdge = null;
+  for (const m of ev.markets || []) {
+    const b = parseBucket(m.groupItemTitle || m.question || "");
+    if (!b) continue;
+    unit = b.unit;
+    if (b.side === "LOW") lowEdge = b.value; else highEdge = b.value;
+  }
+  const data = await hourlyTemps(st[0], st[1], unit);
+  const off = data.utc_offset_seconds || 0;
+  const forecast = [];
+  for (let i = 0; i < (data.hourly?.time || []).length; i++)
+    if (data.hourly.time[i].startsWith(date)) forecast.push({ m: +data.hourly.time[i].slice(11, 13) * 60, v: data.hourly.temperature_2m[i] });
+  const localNow = new Date(Date.now() + off * 1000);
+  const localToday = localNow.toISOString().slice(0, 10);
+  const nowMin = date === localToday ? localNow.getUTCHours() * 60 + localNow.getUTCMinutes() : date < localToday ? 1440 : null;
+  const observed = [];
+  if (nowMin != null) {
+    const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
+    for (const o of (await stationObs(code)) || []) {
+      const local = new Date(o.time + off * 1000);
+      if (local.toISOString().slice(0, 10) !== date) continue;
+      observed.push({ m: local.getUTCHours() * 60 + local.getUTCMinutes(), v: Math.round(conv(o.c) * 10) / 10 });
+    }
+    observed.sort((a, b) => a.m - b.m);
+  }
+  const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
+  return { city, date, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, observed, nowMin, lowEdge, highEdge };
+}
+
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
 
 export default async function handler(req, res) {
@@ -670,6 +709,10 @@ export default async function handler(req, res) {
   const cloud = Number.isFinite(cloudN) ? cloudN : SUN_MAX_CLOUD;
   const t0 = Date.now();
   try {
+    if (mode === "graph") {
+      if (!q.slug) return send(res, 400, { error: "Missing market" });
+      return send(res, 200, await graphOne(String(q.slug)));
+    }
     if (mode === "detail") {
       if (!q.slug) return send(res, 400, { error: "Missing market" });
       return send(res, 200, await detailOne(String(q.slug), near));
