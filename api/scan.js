@@ -661,6 +661,18 @@ async function detailOne(slug, near) {
 }
 
 // ---------- Day graph: hourly forecast + real airport readings for one market's day ----------
+const modelHourlyCache = {};
+function modelHourly(lat, lon, unit) {
+  const key = `${lat},${lon},${unit}`;
+  if (!modelHourlyCache[key]) modelHourlyCache[key] = Promise.all(MODELS.map(async ([id, name]) => {
+    try {
+      const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&past_days=1&forecast_days=16&models=${id}`);
+      const k = Object.keys(d.hourly || {}).find(x => x.startsWith("temperature_2m"));
+      return k ? { id, name, time: d.hourly.time, temp: d.hourly[k] } : null;
+    } catch { return null; }
+  }));
+  return modelHourlyCache[key];
+}
 async function graphOne(slug) {
   const found = await getJSON(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`);
   const ev = Array.isArray(found) ? found[0] : found;
@@ -677,8 +689,15 @@ async function graphOne(slug) {
     unit = b.unit;
     if (b.side === "LOW") lowEdge = b.value; else highEdge = b.value;
   }
-  const data = await hourlyTemps(st[0], st[1], unit);
+  const [data, mh] = await Promise.all([hourlyTemps(st[0], st[1], unit), modelHourly(st[0], st[1], unit)]);
   const off = data.utc_offset_seconds || 0;
+  const models = [];
+  for (const m of mh) {
+    if (!m) continue;
+    const points = [];
+    for (let i = 0; i < m.time.length; i++) if (m.time[i].startsWith(date) && m.temp[i] != null) points.push({ m: +m.time[i].slice(11, 13) * 60, v: m.temp[i] });
+    if (points.length) models.push({ id: m.id, name: m.name, points });
+  }
   const forecast = [];
   for (let i = 0; i < (data.hourly?.time || []).length; i++)
     if (data.hourly.time[i].startsWith(date)) forecast.push({ m: +data.hourly.time[i].slice(11, 13) * 60, v: data.hourly.temperature_2m[i] });
@@ -696,7 +715,7 @@ async function graphOne(slug) {
     observed.sort((a, b) => a.m - b.m);
   }
   const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
-  return { city, date, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, observed, nowMin, lowEdge, highEdge };
+  return { city, date, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, models, observed, nowMin, lowEdge, highEdge };
 }
 
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
