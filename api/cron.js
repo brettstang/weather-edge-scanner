@@ -38,7 +38,8 @@ export default async function handler(req, res) {
       }
       if (!fresh.length) continue;
       const fmtDay = d => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
-      const line = h => `${h.nearMiss ? "🟡" : "🟢"} ${h.kind === "low" ? "Low" : "High"} · ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit} → ${h.bucket} (${h.yesPct ?? "?"}%)${h.models && h.models.length ? ` · ${h.agree}/${h.models.length} models` : ""}`;
+      const dot = h => h.side === "LOW" ? (h.nearMiss ? "🩵" : "🔵") : (h.nearMiss ? "🟠" : "🔴");
+      const line = h => `${dot(h)} ${h.kind === "low" ? "Low" : "High"} · ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit} → ${h.bucket} (${h.yesPct ?? "?"}%)${h.models && h.models.length ? ` · ${h.agree}/${h.models.length} models` : ""}`;
       const title = fresh.length === 1
         ? `🌡️ Edge ${fresh[0].kind === "low" ? "low" : "high"} hit: ${fresh[0].city}, ${fmtDay(fresh[0].date)}`
         : `🌡️ ${fresh.length} new Edge temp hits`;

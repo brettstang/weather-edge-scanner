@@ -113,7 +113,9 @@
          background:rgba(94,200,255,.08); border:1px solid rgba(94,200,255,.25); font-size:13px; line-height:1.4; color:#cfe9ff; }
   .obs b { color:#fff; }
   .badge.LOCK { background:rgba(62,230,160,.18); color:var(--green); }
-  .lt { display:inline-block; white-space:nowrap; margin-top:6px; padding:4px 10px; border-radius:999px; font-size:12px;
+  .badge.LOCK.HIGH { background:rgba(255,77,82,.2); color:#ff7a7e; }
+  .badge.LOCK.LOW { background:rgba(45,105,255,.26); color:#7fa6ff; }
+  .lt { display:inline-block; max-width:100%; margin-top:6px; padding:4px 10px; border-radius:999px; font-size:12px;
         background:rgba(255,255,255,.08); color:#dfe4ff; border:1px solid var(--stroke); font-variant-numeric:tabular-nums; }
   .row .lt { margin:4px 0 0; padding:2px 8px; font-size:11px; }
   .gbtn { width:100%; margin:0 0 12px; padding:11px; border-radius:14px; border:1px solid var(--stroke); cursor:pointer;
@@ -246,17 +248,23 @@
           padding:16px 16px 14px; margin:0 0 12px; -webkit-backdrop-filter:blur(24px); backdrop-filter:blur(24px);
           animation:rise .35s ease both; }
   .card::before { content:""; position:absolute; inset:0 auto 0 0; width:4px; }
-  .card.LOW::before { background:linear-gradient(var(--cold),var(--cold-2)); }
-  .card.HIGH::before { background:linear-gradient(var(--hot),var(--hot-2)); }
+  /* Edge colours: high hit = red, near high = orange, low hit = dark blue, near low = very light blue */
+  .card.HIGH::before { background:linear-gradient(#ff5a5f,#e0262d); }
+  .card.HIGH.near::before { background:linear-gradient(#ffb066,#ff8a1f); }
+  .card.LOW::before { background:linear-gradient(#3d7bff,#1f4fd1); }
+  .card.LOW.near::before { background:linear-gradient(#e3f4ff,#b9e2ff); }
   .card.near { opacity:.92; }
   @keyframes rise { from { opacity:0; transform:translateY(8px); } }
 
   .top { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+  .top > div:first-child { flex:1; min-width:0; }
   .city { font-size:22px; font-weight:800; letter-spacing:-.4px; }
   .date { color:var(--muted); font-size:14px; margin-top:2px; }
   .badge { flex:none; font-size:12px; font-weight:700; padding:6px 10px; border-radius:999px; letter-spacing:.3px; }
-  .badge.LOW { background:rgba(94,200,255,.16); color:var(--cold); }
-  .badge.HIGH { background:rgba(255,159,67,.16); color:var(--hot); }
+  .badge.HIGH { background:rgba(255,77,82,.2); color:#ff7a7e; }
+  .badge.nearHIGH { background:rgba(255,145,40,.18); color:#ffab5c; }
+  .badge.LOW { background:rgba(45,105,255,.26); color:#7fa6ff; }
+  .badge.nearLOW { background:rgba(200,235,255,.16); color:#d9f1ff; }
   .badge.nearb { background:rgba(255,209,102,.15); color:var(--amber); }
 
   .nums { display:flex; align-items:flex-end; justify-content:space-between; margin:14px 0 6px; }
@@ -407,10 +415,13 @@ function linkRow(h) {
 // Live local date & time for a city (IANA timezone from Open-Meteo)
 function fmtLocal(tz) {
   try {
-    return new Intl.DateTimeFormat(undefined, { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date());
+    const now = new Date();
+    const t = new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(now);
+    const d = new Intl.DateTimeFormat(undefined, { timeZone: tz, month: "short", day: "numeric" }).format(now);
+    return `${t} · ${d}`;
   } catch { return ""; }
 }
-const lt = tz => tz ? `<div class="lt" data-tz="${esc(tz)}">🕒 Local now: <span>${esc(fmtLocal(tz))}</span></div>` : "";
+const lt = tz => tz ? `<div class="lt" data-tz="${esc(tz)}">🕒 Local <span>${esc(fmtLocal(tz))}</span></div>` : "";
 setInterval(() => document.querySelectorAll(".lt[data-tz]").forEach(el => { el.querySelector("span").textContent = fmtLocal(el.dataset.tz); }), 20000);
 
 function obsLine(o, unit, extra, k = kind) {
@@ -421,9 +432,9 @@ function obsLine(o, unit, extra, k = kind) {
 
 function hitCard(h, row) {
   const sign = h.past > 0 ? `${h.past}° past the line` : h.past === 0 ? "right on the line" : `${Math.abs(h.past)}° short`;
-  const badge = h.locked ? `<span class="badge LOCK">✅ ALREADY HIT</span>`
+  const badge = h.locked ? `<span class="badge LOCK ${h.side}">✅ ALREADY HIT</span>`
               : h.status === "none" ? `<span class="badge nearb" style="background:rgba(255,255,255,.1);color:var(--muted)">NO HIT · ${Math.abs(h.past)}° FROM ${h.side}</span>`
-              : h.nearMiss ? `<span class="badge nearb">NEAR · ${h.side}</span>`
+              : h.nearMiss ? `<span class="badge near${h.side}">${h.side === "LOW" ? "❄︎" : "🔥"} NEAR · ${h.side}</span>`
                            : `<span class="badge ${h.side}">${h.side === "LOW" ? "❄︎ LOW EDGE" : "🔥 HIGH EDGE"}</span>`;
   const low = row?.low?.threshold ?? (h.side === "LOW" ? h.threshold : null);
   const high = row?.high?.threshold ?? (h.side === "HIGH" ? h.threshold : null);
