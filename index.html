@@ -239,6 +239,12 @@
   .stat b { display:block; font-size:24px; font-weight:800; letter-spacing:-.5px; }
   .stat span { color:var(--muted); font-size:12px; }
   .stat.hit b { color:var(--green); } .stat.near b { color:var(--amber); }
+  button.stat { font:inherit; color:inherit; text-align:left; cursor:pointer; }
+  .stat.tap small { display:block; font-size:11px; color:var(--faint); margin-top:4px; }
+  .stat.tap:not([disabled]) small { color:#9fc4ff; }
+  .stat.tap.on { background:rgba(255,255,255,.14); box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.4); }
+  .stat.tap[disabled] { cursor:default; opacity:.7; }
+  .hsec { scroll-margin-top:12px; }
   .when { color:var(--faint); font-size:12px; text-align:center; margin:8px 0 2px; }
 
   .section { color:var(--muted); font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.8px; margin:24px 4px 10px; }
@@ -471,17 +477,18 @@ function render(data) {
   let html = `
     <div class="stats">
       <div class="stat"><b>${overview.length}</b><span>Open markets</span></div>
-      <div class="stat hit"><b>${hits.length}</b><span>Edge hits</span></div>
-      <div class="stat near"><b>${near.length}</b><span>Near misses</span></div>
+      <button class="stat hit tap" data-sec="sec-hits"${hits.length ? "" : " disabled"}><b>${hits.length}</b><span>Edge hits</span><small>${hits.length ? "Tap to view ›" : "None"}</small></button>
+      <button class="stat near tap" data-sec="sec-near"${near.length ? "" : " disabled"}><b>${near.length}</b><span>Near misses</span><small>${near.length ? "Tap to view ›" : $("near").checked ? "None" : "Switch is off"}</small></button>
     </div>
     ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
     <div class="when">Updated ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })}</div>`;
 
-  html += `<div class="section">Results</div>`;
   if (!data.hits.length) {
-    html += `<div class="card empty">${NURSE}<span class="rx">${rx()}</span>No forecast is in an edge bucket right now.<br>Check the full list below to see how close each one is.</div>`;
+    html += `<div class="section">Results</div><div class="card empty">${NURSE}<span class="rx">${rx()}</span>No forecast is in an edge bucket right now.<br>Check the full list below to see how close each one is.</div>`;
   } else {
-    html += data.hits.map(h => hitCard(h, rows[key(h)])).join("");
+    // Hits and near misses stay tucked away until their tile is tapped
+    html += `<div class="hsec" id="sec-hits" hidden><div class="section">Edge hits (${hits.length})</div>${hits.map(h => hitCard(h, rows[key(h)])).join("")}</div>`;
+    html += `<div class="hsec" id="sec-near" hidden><div class="section">Near misses (${near.length})</div>${near.map(h => hitCard(h, rows[key(h)])).join("")}</div>`;
   }
 
   if (overview.length) {
@@ -504,6 +511,19 @@ function render(data) {
   }
   $("out").innerHTML = html;
 }
+
+// Tap the Edge hits / Near misses tiles to show or hide their cards
+document.addEventListener("click", e => {
+  const t = e.target.closest(".stat.tap");
+  if (!t || t.disabled) return;
+  const sec = document.getElementById(t.dataset.sec);
+  if (!sec) return;
+  const show = sec.hidden;
+  sec.hidden = !show;
+  t.classList.toggle("on", show);
+  t.querySelector("small").textContent = show ? "Tap to hide ‹" : "Tap to view ›";
+  if (show) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+});
 
 function strip(hours, start, end) {
   const h = i => String(i).padStart(2, "0") + ":00";
