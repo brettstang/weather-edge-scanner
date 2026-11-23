@@ -777,7 +777,7 @@ async function observedDaily(code, offset, unit, kind) {
 
 // Score every model at this airport and choose/weight the best ones (cached 12 h)
 function stationSkill(st, code, unit, kind) {
-  return cached(`skill:v7:${code}:${unit}:${kind}`, 12 * 3600, async () => {
+  return cached(`skill:v8:${code}:${unit}:${kind}`, 12 * 3600, async () => {
     if (!/^[A-Z]{4}$/.test(code) && code !== "HKO") return { days: 0, leads: {}, reason: "No airport reports for this station", _ttl: 3600 };
     const pr = await previousRunsDaily(st[0], st[1], unit, kind);
     const obs = await observedDaily(code, pr.offset, unit, kind);
@@ -824,6 +824,8 @@ function stationSkill(st, code, unit, kind) {
         strength: pick.a,
         smartMiss: smartErrs.length ? r1(avg(smartErrs.map(Math.abs))) : null,
         blendMiss: stats.best_match ? stats.best_match.rawMiss : null,
+        // What the Smart high/low would have said for each past day, learned WITHOUT that day
+        past: Object.fromEntries(testDays.map((d, i) => [d, r1(obs[d].ext + smartErrs[i])])),
         models: Object.fromEntries(Object.entries(stats).map(([id, S]) => [id, { bias: S.bias, rawMiss: S.rawMiss, n: S.n }]))
       };
     }
@@ -893,7 +895,8 @@ async function smartFor(st, code, unit, kind, date, localToday) {
       hb: skill.hourBias && skill.hourBias[c.id] ? skill.hourBias[c.id] : null })),
     smartMiss: L.smartMiss, blendMiss: L.blendMiss,
     hourly: skill.hourly || null,     // { strength, miss, uncorrectedMiss, blendMiss, hours }
-    line: skill.line || null          // models + hour-of-day corrections for the hourly Smart line
+    line: skill.line || null,         // models + hour-of-day corrections for the hourly Smart line
+    pastDaily: skill.leads?.[1]?.past || null   // honest day-ahead Smart high/low for past days
   };
 }
 
@@ -1164,7 +1167,20 @@ async function graphOne(slug, days = 1) {
         // Gently pull the market day's remaining high/low onto the card's Smart value (±3 h bell)
         const e = ahead.reduce((a, p) => !a || (kind === "low" ? p.v < a.v : p.v > a.v) ? p : a, null);
         const delta = e ? sm.value - e.v : 0;
-        points = points.map(p => ({ m: p.m, v: Math.round((p.v + (e && p.m >= Math.max(dayStart, pastEnd) ? delta * Math.exp(-(((p.m - e.m) / 180) ** 2)) : 0)) * 10) / 10 }));
+        points = points.map(p => ({ m: p.m, v: p.v + (e && p.m >= Math.max(dayStart, pastEnd) ? delta * Math.exp(-(((p.m - e.m) / 180) ** 2)) : 0) }));
+        // Past days: pull each day's high/low onto what the Smart daily forecast said a day ahead
+        // (learned without that day), so the past line shows the Smart forecast's real track record
+        if (sm.pastDaily && pr) {
+          const byDay = {};
+          points.forEach((p, i) => { if (p.m < dayStart && p.m < pastEnd) (byDay[toKey(p.m).slice(0, 10)] ||= []).push(i); });
+          for (const [d, idx] of Object.entries(byDay)) {
+            const target = sm.pastDaily[d]; if (target == null || idx.length < 18) continue;
+            const ei = idx.reduce((a, i) => a == null || (kind === "low" ? points[i].v < points[a].v : points[i].v > points[a].v) ? i : a, null);
+            const dd = target - points[ei].v, em = points[ei].m;
+            for (const i of idx) points[i] = { m: points[i].m, v: points[i].v + dd * Math.exp(-(((points[i].m - em) / 240) ** 2)) };
+          }
+        }
+        points = points.map(p => ({ m: p.m, v: Math.round(p.v * 10) / 10 }));
         smart = { points, value: sm.value, used: sm.used.map(u => u.id), lineModels: lineModels.map(u => u.id), fallback: !!sm.fallback, hourly: sm.hourly || null };
       }
     }
