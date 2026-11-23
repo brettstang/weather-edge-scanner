@@ -39,7 +39,10 @@ export default async function handler(req, res) {
       if (!fresh.length) continue;
       const fmtDay = d => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
       const dot = h => h.side === "LOW" ? (h.nearMiss ? "🩵" : "🔵") : (h.nearMiss ? "🟠" : "🔴");
-      const line = h => `${dot(h)} ${h.kind === "low" ? "Low" : "High"} · ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit} → ${h.bucket} (${h.yesPct ?? "?"}%)${h.models && h.models.length ? ` · ${h.agree}/${h.models.length} models` : ""}`;
+      const src = h => { const t = h.triggers || {}, want = h.nearMiss ? "near" : "hit";
+        const om = t.openmeteo === want || (want === "near" && t.openmeteo === "hit"), sm = t.smart === want || (want === "near" && t.smart === "hit");
+        return om && sm ? " · both forecasts" : sm ? " · 🧠 Smart" : om ? " · Open-Meteo" : ""; };
+      const line = h => `${dot(h)} ${h.kind === "low" ? "Low" : "High"} · ${h.city} ${fmtDay(h.date)}: ${Math.round(h.forecast * 10) / 10}°${h.unit}${h.smart && h.smart.adjusted != null ? ` (Smart ${Math.round(h.smart.adjusted * 10) / 10}°)` : ""} → ${h.bucket} (${h.yesPct ?? "?"}%)${h.models && h.models.length ? ` · ${h.agree}/${h.models.length} models` : ""}${src(h)}`;
       const title = fresh.length === 1
         ? `🌡️ Edge ${fresh[0].kind === "low" ? "low" : "high"} hit: ${fresh[0].city}, ${fmtDay(fresh[0].date)}`
         : `🌡️ ${fresh.length} new Edge temp hits`;

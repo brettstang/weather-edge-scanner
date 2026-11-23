@@ -169,6 +169,21 @@
   .glh { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin:10px 2px 2px; }
   .gtip { text-align:center; font-size:11px; color:var(--faint); margin-top:8px; }
   .gsum { text-align:center; font-size:13px; color:#dfe4ff; margin:2px 0 6px; }
+  .sdot { position:absolute; top:50%; width:18px; height:18px; margin:-9px 0 0 -9px; border-radius:50%; border:3px solid #c9a7ff;
+          background:transparent; box-shadow:0 0 10px rgba(201,167,255,.6); }
+  .trig { margin:0 0 12px; font-size:12.5px; color:var(--muted); text-align:center; }
+  .trig span { margin:0 6px; color:var(--faint); }
+  .tg { font-size:11px; letter-spacing:.4px; padding:2px 7px; border-radius:999px; margin-left:3px; }
+  .tg.hit { background:rgba(62,230,160,.16); color:var(--green); } .tg.near { background:rgba(255,209,102,.16); color:var(--amber); }
+  .tg.none { color:var(--faint); }
+  .smartbox { margin:0 0 12px; padding:11px 12px; border-radius:14px; background:linear-gradient(135deg,rgba(150,110,255,.16),rgba(80,160,255,.10));
+              border:1px solid rgba(180,150,255,.35); }
+  .smartbox .sh { display:flex; align-items:center; gap:10px; font-weight:700; font-size:15px; }
+  .smartbox .sh b { font-size:22px; font-weight:800; margin-left:auto; }
+  .smartbox .sd { font-size:12.5px; color:#d8dcff; margin-top:6px; line-height:1.45; }
+  .smartbox .mixes { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .smartbox .mix { display:inline-flex; align-items:center; gap:5px; font-size:12px; padding:3px 8px; border-radius:999px; background:rgba(255,255,255,.08); }
+  .smartbox .mix i { width:8px; height:8px; border-radius:50%; } .smartbox .mix small { color:var(--muted); }
   .cap { font-size:12px; color:var(--faint); margin-top:12px; }
   details.hours { margin:10px 0 2px; }
   details.hours summary { background:rgba(255,255,255,.06); padding:10px 14px; border-radius:12px; font-size:14px; }
@@ -388,17 +403,42 @@ const rx = () => NOTES[Math.floor(Math.random() * NOTES.length)];
 const pct = v => v == null ? "?" : (v < 1 && v > 0 ? v.toFixed(1) : Math.round(v)) + "%";
 
 // Horizontal temperature bar: low edge tick, high edge tick, forecast dot.
-function bar(low, high, fc, unit) {
+function bar(low, high, fc, unit, sfc = null) {
   const lo = low ?? (high != null ? high - 10 : fc - 5);
   const hi = high ?? (low != null ? low + 10 : fc + 5);
   const pad = Math.max(2, (hi - lo) * 0.25);
-  const min = Math.min(lo - pad, fc - 1), max = Math.max(hi + pad, fc + 1);
+  const min = Math.min(lo - pad, fc - 1, sfc ?? Infinity), max = Math.max(hi + pad, fc + 1, sfc ?? -Infinity);
   const x = v => Math.max(2, Math.min(98, ((v - min) / (max - min)) * 100));
   return `<div class="bar">
     ${low != null ? `<div class="tick" style="left:${x(low)}%"><em>≤${low}°</em></div>` : ""}
     ${high != null ? `<div class="tick" style="left:${x(high)}%"><em>≥${high}°</em></div>` : ""}
+    ${sfc != null ? `<div class="sdot" style="left:${x(sfc)}%" title="Smart forecast"></div>` : ""}
     <div class="dot" style="left:${x(fc)}%"></div>
   </div>`;
+}
+
+function smartBox(h) {
+  const S = h.smart;
+  if (!S) return "";
+  const v = S.adjusted ?? S.value, lo = h.kind === "low";
+  const st = h.triggers?.smart || "none";
+  const short = h.smartPast == null ? "" : h.smartPast >= 0 ? (h.smartPast === 0 ? "right on the line" : `${h.smartPast}° past the line`) : `${Math.abs(h.smartPast)}° short`;
+  const pill = st === "hit" ? `<span class="pill pass">✓ IN BUCKET</span>` : st === "near" ? `<span class="pill near">NEAR</span>` : `<span class="pill na">NO HIT</span>`;
+  const mix = S.used.map(u => `<span class="mix"><i style="background:${MODEL_COLORS[u.id] || "#aaa"}"></i>${esc(SHORT[u.id] || u.name)} ${Math.round(u.w * 100)}%${!S.fallback && Math.abs(u.bias) >= 0.1 ? ` <small>${u.bias > 0 ? "−" : "+"}${Math.abs(u.bias).toFixed(1)}°</small>` : ""}</span>`).join("");
+  const track = S.fallback
+    ? `<div class="sd">${esc(S.reason || "Not enough history yet")}, so this is a plain average of the models.</div>`
+    : `<div class="sd">Past ${S.days} days at ${esc(h.station)}: Smart missed by <b>±${S.smartMiss ?? "?"}°</b>${S.blendMiss != null ? `, Open-Meteo by <b>±${S.blendMiss}°</b>` : ""} (forecasts made ${S.lead === 2 ? "2 days" : "1 day"} ahead).</div>`;
+  return `<div class="smartbox">
+    <div class="sh"><span>🧠 Smart ${lo ? "low" : "high"}</span><b>${Math.round(v * 10) / 10}°${h.unit}</b>${pill}</div>
+    <div class="sd">${short ? `Rounds to ${h.smartRounded}°, ${short}. ` : ""}${S.fallback ? "" : "Best models here, bias-corrected:"}</div>
+    <div class="mixes">${mix}</div>
+    ${track}
+  </div>`;
+}
+function triggerLine(h) {
+  const t = h.triggers; if (!t) return "";
+  const lab = s => s === "hit" ? `<b class="tg hit">HIT</b>` : s === "near" ? `<b class="tg near">NEAR</b>` : `<b class="tg none">—</b>`;
+  return `<div class="trig">Open-Meteo ${lab(t.openmeteo)} <span>·</span> 🧠 Smart ${lab(t.smart)}</div>`;
 }
 
 function modelBox(h) {
@@ -452,12 +492,14 @@ function hitCard(h, row) {
     <div class="nums">
       <div class="temp"><small>${(() => { const lo = h.kind === "low", w = lo ? "low" : "high";
         const beyond = h.observed && h.forecastModel != null && (lo ? h.observed.value <= h.forecastModel : h.observed.value >= h.forecastModel);
-        return beyond ? (lo ? "Low so far" : "High so far") : "Forecast " + w; })()}</small>${Math.round(h.forecast * 10) / 10}°<span style="font-size:22px">${h.unit}</span></div>
+        return beyond ? (lo ? "Low so far" : "High so far") : "Open-Meteo " + w; })()}</small>${Math.round(h.forecast * 10) / 10}°<span style="font-size:22px">${h.unit}</span></div>
       <div class="odds"><small>Market says</small><b>${pct(h.yesPct)}</b><div class="no">No ${pct(h.noPct)}</div></div>
     </div>
     ${obsLine(h.observed, h.unit, h.locked ? "The airport has already reached this edge today."
         : h.forecastModel != null && Math.abs(h.forecastModel - h.forecast) > 0.05 ? `Already ${h.kind === "low" ? "below" : "above"} the model forecast of ${Math.round(h.forecastModel * 10) / 10}°.` : "", h.kind)}
-    ${bar(low, high, h.forecast, h.unit)}
+    ${bar(low, high, h.forecast, h.unit, h.smart ? (h.smart.adjusted ?? h.smart.value) : null)}
+    ${triggerLine(h)}
+    ${smartBox(h)}
     ${modelBox(h)}
     ${h.slug ? `<button class="gbtn" data-slug="${esc(h.slug)}">📈 Day graph</button><div class="gbox"></div>` : ""}
     ${linkRow(h)}
@@ -496,10 +538,10 @@ function render(data) {
       <div class="row tap" data-slug="${esc(o.slug || "")}">
         <div class="rtop"><b>${esc(o.city)}</b><span>${fmtDate(o.date)} · ${esc(o.station)} <em class="chev">›</em></span></div>
         ${lt(o.tz)}
-        ${bar(o.low?.threshold ?? null, o.high?.threshold ?? null, o.forecast, o.unit)}
+        ${bar(o.low?.threshold ?? null, o.high?.threshold ?? null, o.forecast, o.unit, o.smart ? (o.smart.adjusted ?? o.smart.value) : null)}
         <div class="edges">
           <span style="color:var(--cold)">${o.low ? `≤${o.low.threshold}° · ${pct(o.low.yesPct)}` : "–"}</span>
-          <span style="color:#fff">Forecast ${Math.round(o.forecast * 10) / 10}°${o.unit}</span>
+          <span style="color:#fff">${Math.round(o.forecast * 10) / 10}°${o.smart ? ` <span style="color:#c9a7ff">· 🧠 ${Math.round((o.smart.adjusted ?? o.smart.value) * 10) / 10}°</span>` : ""}${o.unit}</span>
           <span style="color:var(--hot)">${o.high ? `≥${o.high.threshold}° · ${pct(o.high.yesPct)}` : "–"}</span>
         </div>
       </div>`).join("")}</details>`;

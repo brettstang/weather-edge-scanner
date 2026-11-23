@@ -3,6 +3,8 @@
 // station from each market's rules, gets the Open-Meteo forecast high at that exact
 // airport, and reports any city/day where the forecast lands in an edge bucket.
 
+import { redis, hasRedis } from "./_push.js";
+
 const GAMMA = "https://gamma-api.polymarket.com";
 
 // Common Polymarket settlement stations: [lat, lon, name]. Unknown codes are looked up from OurAirports.
@@ -244,12 +246,15 @@ export function parseMetar(o) {
   const special = o.metarType === "SPECI" || /^SPECI\b/.test(raw);
   return { time, c, special };
 }
-function stationObs(code, hours = 36) {
+function stationObs(code, hours = 168) {
   if (!/^[A-Z]{4}$/.test(code)) return Promise.resolve(null);
   const ck = `${code},${hours}`;
-  if (!obsCache[ck]) obsCache[ck] = getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=${hours}`)
-    .then(list => (Array.isArray(list) ? list : []).map(parseMetar).filter(x => x.time && x.c != null && !x.special))
-    .catch(() => null);
+  const get = h => getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=${h}`)
+    .then(list => (Array.isArray(list) ? list : []).map(parseMetar).filter(x => x.time && x.c != null && !x.special));
+  // Ask for 7 days; if the service won't give that much, fall back to the last 36 hours
+  if (!obsCache[ck]) obsCache[ck] = get(hours)
+    .then(list => list.length || hours <= 36 ? list : get(36))
+    .catch(() => hours > 36 ? get(36).catch(() => null) : null);
   return obsCache[ck];
 }
 // Summarise today's observations in the station's local time and the market's unit.
@@ -517,15 +522,14 @@ function modelHighs(lat, lon, unit, kind = "high") {
   return modelCache[key];
 }
 async function addModels(hit) {
-  const list = await modelHighs(hit.lat, hit.lon, hit.unit, hit.kind);
+  const cur = await currentModelsDaily(hit.lat, hit.lon, hit.station, hit.unit, hit.kind);
+  const day = (cur && cur[hit.date]) || {};
   const models = [];
-  for (const m of list) {
-    if (!m) continue;
-    const i = m.time.indexOf(hit.date);
-    const v = i >= 0 ? m.max[i] : null;
+  for (const [id, name] of MODELS) {
+    const v = day[id];
     if (v == null) continue;
     const r = Math.round(v);
-    models.push({ name: m.name, value: Math.round(v * 10) / 10, inBucket: hit.side === "HIGH" ? r >= hit.threshold : r <= hit.threshold });
+    models.push({ id, name, value: Math.round(v * 10) / 10, inBucket: hit.side === "HIGH" ? r >= hit.threshold : r <= hit.threshold });
   }
   hit.models = models;
   hit.agree = models.filter(m => m.inBucket).length;
@@ -538,6 +542,165 @@ function settlementLink(ev) {
   if (m) return m[0].replace(/[.,;]+$/, "");
   const code = findStation(ev);
   return code && /^[A-Z]{4}$/.test(code) ? `https://aviationweather.gov/data/metar/?id=${code}&hours=24` : null;
+}
+
+// ---------- Smart forecast: per-airport, self-calibrating blend of the best models ----------
+// 1) Previous Runs API → what each model forecast 1 and 2 days ahead, for the past ~7 days.
+// 2) Airport METARs (routine reports, Polymarket's settlement data) → the actual daily high/low.
+// 3) Per model: bias (shrunk toward 0 when data is thin) and an honest leave-one-out error.
+// 4) Keep the best model(s), weight by accuracy, subtract each model's bias, combine.
+// Recomputed from a rolling 7-day window, so it re-learns as new days come in.
+const SMART_IDS = MODELS.map(m => m[0]);
+const MODEL_NAME = Object.fromEntries(MODELS);
+const SMART_DAYS = 7, MIN_DAYS = 3, MIN_REPORTS = 18;
+const shrink = k => k / (k + 1);   // trust the learned bias more as days accumulate (6 days → 86%)
+const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+const r1 = v => Math.round(v * 10) / 10;
+const addDaysIso = (date, n) => new Date(Date.parse(date + "T12:00:00Z") + n * 86400000).toISOString().slice(0, 10);
+
+const memo = {};
+function memoize(key, fn) {
+  if (!memo[key]) memo[key] = fn().catch(e => { delete memo[key]; throw e; });
+  return memo[key];
+}
+// Shared cache: Redis when connected (survives between scans and phones), otherwise this run only
+function cached(key, ttlSec, fn) {
+  return memoize(key, async () => {
+    if (hasRedis()) { try { const v = await redis("GET", key); if (v) return JSON.parse(v); } catch {} }
+    const val = await fn();
+    if (val != null && hasRedis()) redis("SET", key, JSON.stringify(val), "EX", String(ttlSec)).catch(() => {});
+    return val;
+  });
+}
+
+// Daily high/low from each model's forecast made 1 and 2 days earlier
+async function previousRunsDaily(lat, lon, unit, kind) {
+  let ids = ["best_match", ...SMART_IDS];
+  const leads = [1, 2];
+  const url = list => `https://previous-runs-api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    `&hourly=${leads.map(L => `temperature_2m_previous_day${L}`).join(",")}&models=${list.join(",")}` +
+    `&past_days=${SMART_DAYS + 2}&forecast_days=1&timezone=auto&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}`;
+  let d;
+  try { d = await getJSON(url(ids)); }
+  catch { ids = SMART_IDS; d = await getJSON(url(ids)); }   // retry without the blend if it isn't accepted
+  const h = d.hourly || {}, out = {};
+  for (const id of ids) for (const L of leads) {
+    const arr = h[`temperature_2m_previous_day${L}_${id}`];
+    if (!arr) continue;
+    const byDate = {};
+    (h.time || []).forEach((t, i) => {
+      const v = arr[i]; if (v == null) return;
+      const dt = t.slice(0, 10), e = byDate[dt];
+      if (!e) byDate[dt] = { v, n: 1 }; else { e.v = kind === "low" ? Math.min(e.v, v) : Math.max(e.v, v); e.n++; }
+    });
+    const series = {};
+    for (const [dt, e] of Object.entries(byDate)) if (e.n >= 20) series[dt] = e.v;
+    (out[id] = out[id] || {})[L] = series;
+  }
+  return { offset: d.utc_offset_seconds || 0, byModel: out };
+}
+
+// Actual daily high/low at the airport from routine reports (complete days only)
+async function observedDaily(code, offset, unit, kind) {
+  const obs = await stationObs(code);
+  const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
+  const days = {};
+  for (const o of obs || []) {
+    const dt = new Date(o.time + offset * 1000).toISOString().slice(0, 10), v = conv(o.c), e = days[dt];
+    if (!e) days[dt] = { ext: v, n: 1 }; else { e.ext = kind === "low" ? Math.min(e.ext, v) : Math.max(e.ext, v); e.n++; }
+  }
+  return days;
+}
+
+// Score every model at this airport and choose/weight the best ones (cached 12 h)
+function stationSkill(st, code, unit, kind) {
+  return cached(`skill:v1:${code}:${unit}:${kind}`, 12 * 3600, async () => {
+    if (!/^[A-Z]{4}$/.test(code)) return { days: 0, leads: {}, reason: "No airport reports for this station" };
+    const pr = await previousRunsDaily(st[0], st[1], unit, kind);
+    const obs = await observedDaily(code, pr.offset, unit, kind);
+    const localToday = new Date(Date.now() + pr.offset * 1000).toISOString().slice(0, 10);
+    const days = Object.keys(obs).filter(d => d < localToday && obs[d].n >= MIN_REPORTS).sort().slice(-SMART_DAYS);
+    const res = { days: days.length, dates: days, leads: {}, at: new Date().toISOString() };
+    if (days.length < MIN_DAYS) { res.reason = "Not enough complete days of airport reports yet"; return res; }
+    for (const L of [1, 2]) {
+      const stats = {};
+      for (const id of ["best_match", ...SMART_IDS]) {
+        const series = pr.byModel[id]?.[L];
+        if (!series) continue;
+        const ds = days.filter(d => series[d] != null);
+        if (ds.length < MIN_DAYS) continue;
+        const err = Object.fromEntries(ds.map(d => [d, series[d] - obs[d].ext]));   // + = model too warm
+        const errs = Object.values(err), n = errs.length, sum = errs.reduce((a, b) => a + b, 0);
+        const looBias = d => (sum - err[d]) / (n - 1) * shrink(n - 1);              // bias learned without day d
+        const loo = ds.map(d => err[d] - looBias(d));
+        stats[id] = { n, bias: r1(sum / n * shrink(n)), rawMiss: r1(avg(errs.map(Math.abs))), rmse: Math.sqrt(avg(loo.map(e => e * e))), err, ds };
+      }
+      const ranked = SMART_IDS.filter(id => stats[id]).sort((a, b) => stats[a].rmse - stats[b].rmse);
+      if (!ranked.length) continue;
+      const best = stats[ranked[0]].rmse;
+      const chosen = ranked.filter(id => stats[id].rmse <= best * 1.25 + 0.3).slice(0, 4);
+      const w = Object.fromEntries(chosen.map(id => [id, 1 / (stats[id].rmse ** 2 + 0.1)]));
+      // Honest track record of the Smart blend itself: each day uses biases learned from the other days
+      const smartErrs = days.filter(d => chosen.every(id => stats[id].err[d] != null)).map(d => {
+        let num = 0, den = 0;
+        for (const id of chosen) {
+          const S = stats[id], n = S.n, sum = Object.values(S.err).reduce((a, b) => a + b, 0);
+          const b = (sum - S.err[d]) / (n - 1) * shrink(n - 1);
+          num += w[id] * (S.err[d] - b); den += w[id];
+        }
+        return num / den;
+      });
+      const wsum = Object.values(w).reduce((a, b) => a + b, 0);
+      res.leads[L] = {
+        chosen: chosen.map(id => ({ id, w: r1(w[id] / wsum * 100) / 100, bias: stats[id].bias, miss: r1(stats[id].rmse) })),
+        smartMiss: smartErrs.length ? r1(avg(smartErrs.map(Math.abs))) : null,
+        blendMiss: stats.best_match ? stats.best_match.rawMiss : null,
+        models: Object.fromEntries(Object.entries(stats).map(([id, S]) => [id, { bias: S.bias, rawMiss: S.rawMiss, n: S.n }]))
+      };
+    }
+    return res;
+  });
+}
+
+// Today's forecast high/low from every model in one request (cached 3 h; models update every ~6 h)
+function currentModelsDaily(lat, lon, code, unit, kind) {
+  return cached(`cur:v1:${code}:${unit}:${kind}`, 3 * 3600, async () => {
+    const v = kind === "low" ? "temperature_2m_min" : "temperature_2m_max";
+    const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=${v}` +
+      `&models=${SMART_IDS.join(",")}&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&forecast_days=7`);
+    const out = {};
+    for (const id of SMART_IDS) {
+      const arr = d.daily?.[`${v}_${id}`] || (SMART_IDS.length === 1 ? d.daily?.[v] : null);
+      (d.daily?.time || []).forEach((t, i) => { if (arr && arr[i] != null) (out[t] = out[t] || {})[id] = arr[i]; });
+    }
+    return out;
+  });
+}
+
+async function smartFor(st, code, unit, kind, date, localToday) {
+  const [skill, cur] = await Promise.all([
+    stationSkill(st, code, unit, kind).catch(() => null),
+    currentModelsDaily(st[0], st[1], code, unit, kind)
+  ]);
+  const today = cur && cur[date];
+  if (!today || !Object.keys(today).length) return null;
+  const ahead = Math.round((Date.parse(date) - Date.parse(localToday)) / 86400000);
+  const lead = Math.min(2, Math.max(1, ahead));
+  const L = skill?.leads?.[lead] || skill?.leads?.[1];
+  const used = L ? L.chosen.filter(c => today[c.id] != null) : [];
+  if (!used.length) {
+    // Not enough history: plain average of the models, no bias correction
+    const ids = Object.keys(today);
+    return { value: r1(avg(ids.map(id => today[id]))), fallback: true, reason: skill?.reason || "No model history yet",
+      days: skill?.days || 0, used: ids.map(id => ({ id, name: MODEL_NAME[id] || id, w: r1(1 / ids.length * 100) / 100, bias: 0 })) };
+  }
+  const ws = used.reduce((a, c) => a + c.w, 0);
+  const value = used.reduce((a, c) => a + c.w * (today[c.id] - c.bias), 0) / ws;
+  return {
+    value: r1(value), lead, days: skill.days,
+    used: used.map(c => ({ id: c.id, name: MODEL_NAME[c.id] || c.id, w: r1(c.w / ws * 100) / 100, bias: c.bias, miss: c.miss, raw: r1(today[c.id]) })),
+    smartMiss: L.smartMiss, blendMiss: L.blendMiss
+  };
 }
 
 // ---------- Edge temperature scan ----------
@@ -553,7 +716,7 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
     const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
     const row = { city, date, station: code, stationName: st[2], unit: null, forecast: null, low: null, high: null,
                   url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug, hit: null };
-    let isFinished = false;
+    let isFinished = false, smart, smartTried = false;
     for (const m of ev.markets || []) {
       if (m.closed) continue;
       const label = m.groupItemTitle || m.question || "";
@@ -561,6 +724,10 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
       if (!b) continue;
       let f;
       try { f = await forecastHigh(st[0], st[1], b.unit, date, kind); } catch { f = null; }
+      if (f && !smartTried && date >= f.localToday) {
+        smartTried = true;
+        try { smart = await smartFor(st, code, b.unit, kind, date, f.localToday); } catch { smart = null; }
+      }
       if (f && date < f.localToday) { isFinished = true; break; }
       let fc = f ? f.value : null;
       if (fc == null) continue;
@@ -574,19 +741,29 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
       const fcModel = fc;
       // The day's high can't end below what's been recorded; the day's low can't end above it
       if (obsNow) fc = hi ? Math.max(fc, obsNow.max) : Math.min(fc, obsNow.min);
+      let sfc = smart ? smart.value : null;
+      if (sfc != null && obsNow) sfc = hi ? Math.max(sfc, obsNow.max) : Math.min(sfc, obsNow.min);
+      if (smart) row.smart = { ...smart, adjusted: sfc };
       const p = yesPrice(m);
       const yesPct = p == null ? null : Math.round(p * 1000) / 10;
       row.unit = b.unit; row.forecast = fc;
       row[b.side === "LOW" ? "low" : "high"] = { threshold: b.value, label, yesPct };
       const r = Math.round(fc);
       const past = b.side === "HIGH" ? r - b.value : b.value - r;
-      if (past >= -near) {
+      // Smart forecast is judged by exactly the same rule
+      const sr = sfc != null ? Math.round(sfc) : null;
+      const spast = sr == null ? null : b.side === "HIGH" ? sr - b.value : b.value - sr;
+      const status = v => v == null ? "none" : v >= 0 ? "hit" : v >= -1 ? "near" : "none";
+      const best = Math.max(past, spast ?? -Infinity);
+      if (best >= -near) {
         const hit = {
           city, date, side: b.side, bucket: label,
           threshold: b.value, unit: b.unit, forecast: fc, rounded: r, past,
           yesPct, noPct: p == null ? null : Math.round((1 - p) * 1000) / 10,
           station: code, stationName: st[2], lat: st[0], lon: st[1],
-          url: row.url, slug: ev.slug, nearMiss: past < 0, settle: settlementLink(ev),
+          url: row.url, slug: ev.slug, nearMiss: best < 0, settle: settlementLink(ev),
+          smart: row.smart || null, smartRounded: sr, smartPast: spast,
+          triggers: { openmeteo: status(past), smart: status(spast) },
           forecastModel: fcModel, observed: row.observed || null, tz: f.tz,
           kind, locked: !!(obsNow && (hi ? b.side === "HIGH" && Math.round(obsNow.max) >= b.value
                                          : b.side === "LOW" && Math.round(obsNow.min) <= b.value))
@@ -655,9 +832,10 @@ async function detailOne(slug, near) {
   const row = t.overview[0];
   if (!row || !t.hits.length) throw new Error("No forecast available for this market");
   // Show the edge the forecast is closest to (or already inside)
-  const h = t.hits.reduce((a, b) => (b.past > a.past ? b : a));
-  h.nearMiss = h.past < 0;
-  h.status = h.past >= 0 ? "hit" : h.past >= -near && near > 0 ? "near" : "none";
+  const bp = x => Math.max(x.past, x.smartPast ?? -Infinity);   // closer of the two forecasts
+  const h = t.hits.reduce((a, b) => (bp(b) > bp(a) ? b : a));
+  h.nearMiss = bp(h) < 0;
+  h.status = bp(h) >= 0 ? "hit" : bp(h) >= -near && near > 0 ? "near" : "none";
   return { hit: h, row };
 }
 
@@ -742,6 +920,8 @@ async function graphOne(slug, days = 1) {
 }
 
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
+
+export { stationSkill };
 
 export default async function handler(req, res) {
   const q = req.query || {};
