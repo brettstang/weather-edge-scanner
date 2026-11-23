@@ -679,7 +679,7 @@ async function previousRunsDaily(lat, lon, unit, kind) {
     if (/^4/.test(e.message)) { ids = SMART_IDS; d = await historyLimit(() => getJSON(url(ids), 20000)); }   // retry without the blend if it isn't accepted
     else throw e;
   }
-  const h = d.hourly || {}, out = {};
+  const h = d.hourly || {}, out = {}, outHourly = {};
   for (const id of ids) for (const L of leads) {
     const arr = h[`temperature_2m_previous_day${L}_${id}`];
     if (!arr) continue;
@@ -692,8 +692,41 @@ async function previousRunsDaily(lat, lon, unit, kind) {
     const series = {};
     for (const [dt, e] of Object.entries(byDate)) if (e.n >= 20) series[dt] = e.v;
     (out[id] = out[id] || {})[L] = series;
+    if (L === 1) {
+      const hourly = {};
+      (h.time || []).forEach((t, i) => { if (arr[i] != null) hourly[t.slice(0, 13)] = arr[i]; });   // "YYYY-MM-DDTHH"
+      (outHourly[id] = hourly);
+    }
   }
-  return { offset: d.utc_offset_seconds || 0, byModel: out };
+  return { offset: d.utc_offset_seconds || 0, byModel: out, hourly: outHourly };
+}
+
+// Airport readings snapped to the nearest whole hour (local), for learning hour-of-day corrections
+function observedHourly(obs, offset, unit) {
+  const conv = c => unit === "C" ? c : c * 9 / 5 + 32, out = {};
+  for (const o of obs || []) {
+    const local = new Date(o.time + offset * 1000), min = local.getUTCMinutes();
+    if (min > 20 && min < 40) continue;                       // too far from a whole hour
+    const t = new Date(local.getTime() + (min >= 40 ? 3600e3 : 0)).toISOString().slice(0, 13);
+    out[t] = conv(o.c);
+  }
+  return out;
+}
+
+// Per model, a correction for each hour of the day: how far its 1-day-ahead forecast ran from the
+// airport at that hour, smoothed over neighbouring hours and shrunk when there are few samples.
+function hourOfDayBias(modelHourly, obsH) {
+  const err = Array.from({ length: 24 }, () => []);
+  for (const [t, ov] of Object.entries(obsH)) {
+    const mv = modelHourly[t];
+    if (mv != null) err[+t.slice(11, 13)].push(mv - ov);
+  }
+  return Array.from({ length: 24 }, (_, hr) => {
+    const pool = [...err[(hr + 23) % 24], ...err[hr], ...err[hr], ...err[(hr + 1) % 24]];   // centre hour counts double
+    if (pool.length < 4) return null;
+    const n = pool.length / 4 * 2;                              // roughly the number of independent days
+    return Math.round(avg(pool) * shrink(n) * 10) / 10;
+  });
 }
 
 // Actual daily high/low at the airport from routine reports (complete days only)
@@ -719,13 +752,22 @@ async function observedDaily(code, offset, unit, kind) {
 
 // Score every model at this airport and choose/weight the best ones (cached 12 h)
 function stationSkill(st, code, unit, kind) {
-  return cached(`skill:v3:${code}:${unit}:${kind}`, 12 * 3600, async () => {
+  return cached(`skill:v4:${code}:${unit}:${kind}`, 12 * 3600, async () => {
     if (!/^[A-Z]{4}$/.test(code) && code !== "HKO") return { days: 0, leads: {}, reason: "No airport reports for this station", _ttl: 3600 };
     const pr = await previousRunsDaily(st[0], st[1], unit, kind);
     const obs = await observedDaily(code, pr.offset, unit, kind);
     const localToday = new Date(Date.now() + pr.offset * 1000).toISOString().slice(0, 10);
     const days = Object.keys(obs).filter(d => d < localToday && obs[d].n >= MIN_REPORTS).sort().slice(-SMART_DAYS);
     const res = { days: days.length, dates: days, leads: {}, at: new Date().toISOString() };
+    // Hour-of-day corrections (airports only; the Observatory has no hourly history here)
+    if (code !== "HKO") {
+      const obsH = observedHourly(await stationObs(code), pr.offset, unit);
+      res.hourBias = {};
+      for (const id of SMART_IDS) if (pr.hourly && pr.hourly[id]) {
+        const hb = hourOfDayBias(pr.hourly[id], obsH);
+        if (hb.filter(v => v != null).length >= 18) res.hourBias[id] = hb;
+      }
+    }
     if (days.length < MIN_DAYS) { res.reason = code === "HKO" ? "Not enough Observatory daily reports yet" : "Not enough complete days of airport reports yet"; res._ttl = 3600; return res; }
     for (const L of [1, 2]) {
       const stats = {};
@@ -804,7 +846,8 @@ async function smartFor(st, code, unit, kind, date, localToday) {
   const value = used.reduce((a, c) => a + c.w * (today[c.id] - c.bias), 0) / ws;
   return {
     value: r1(value), lead, days: skill.days,
-    used: used.map(c => ({ id: c.id, name: MODEL_NAME[c.id] || c.id, w: r1(c.w / ws * 100) / 100, bias: c.bias, miss: c.miss, raw: r1(today[c.id]) })),
+    used: used.map(c => ({ id: c.id, name: MODEL_NAME[c.id] || c.id, w: r1(c.w / ws * 100) / 100, bias: c.bias, miss: c.miss, raw: r1(today[c.id]),
+      hb: skill.hourBias && skill.hourBias[c.id] ? skill.hourBias[c.id] : null })),
     smartMiss: L.smartMiss, blendMiss: L.blendMiss
   };
 }
@@ -1039,16 +1082,23 @@ async function graphOne(slug, days = 1) {
       const minutes = [...new Set(models.flatMap(m => m.points.map(p => p.m)))].sort((a, b) => a - b);
       let points = [];
       for (const mm of minutes) {
+        const hr = Math.floor(mm / 60) % 24;
         let num = 0, den = 0;
-        for (const u of sm.used) { const v = byId[u.id] && byId[u.id].get(mm); if (v != null) { num += u.w * (v - u.bias); den += u.w; } }
+        for (const u of sm.used) {
+          const v = byId[u.id] && byId[u.id].get(mm); if (v == null) continue;
+          // Prefer the hour-of-day correction; fall back to the daily one only where it was learned (near the extreme)
+          const corr = u.hb && u.hb[hr] != null ? u.hb[hr] : 0;
+          num += u.w * (v - corr); den += u.w;
+        }
         if (den >= total * 0.6) points.push({ m: mm, v: num / den });
       }
-      const day = points.filter(p => p.m >= (days - 1) * 1440);
+      const dayStart = (days - 1) * 1440, day = points.filter(p => p.m >= dayStart);
       if (day.length) {
-        const ext = kind === "low" ? Math.min(...day.map(p => p.v)) : Math.max(...day.map(p => p.v));
-        const shift = sm.value - ext;
-        points = points.map(p => ({ m: p.m, v: Math.round((p.v + shift) * 10) / 10 }));
-        smart = { points, value: sm.value, used: sm.used.map(u => u.id), fallback: !!sm.fallback };
+        // Gently pull the market day's high/low onto the card's Smart value (±3 h bell), leave the rest alone
+        const e = day.reduce((a, p) => !a || (kind === "low" ? p.v < a.v : p.v > a.v) ? p : a, null);
+        const delta = sm.value - e.v;
+        points = points.map(p => ({ m: p.m, v: Math.round((p.v + (p.m >= dayStart ? delta * Math.exp(-(((p.m - e.m) / 180) ** 2)) : 0)) * 10) / 10 }));
+        smart = { points, value: sm.value, used: sm.used.map(u => u.id), fallback: !!sm.fallback, hourly: sm.used.some(u => u.hb) };
       }
     }
   } catch {}

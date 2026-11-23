@@ -834,7 +834,7 @@ function dayGraph(g, opt = {}) {
     </div>
     <div class="gtip">Tap a name to highlight its line. Shaded area = hours already passed.</div>
     <button class="grange" data-days="${days > 1 ? 1 : 4}">${days > 1 ? "📅 Show just this day" : "🗓️ Show past 3 days"}</button>
-    ${days > 1 && best ? `<div class="gtip">Most accurate here over the past days: <b style="color:${colorOf(best[0])}">${esc(best[0] === "blend" ? "Blend" : SHORT[best[0]] || best[0])}</b> (±${best[1].avg.toFixed(1)}° on the daily ${word}). Past hours use each model's latest run, so real multi-day forecasts miss by more.</div>` : ""}`;
+    ${days > 1 && best ? `<div class="gtip">Most accurate here over the past days: <b style="color:${colorOf(best[0])}">${esc(best[0] === "blend" ? "Blend" : best[0] === "smart" ? "🧠 Smart" : SHORT[best[0]] || best[0])}</b> (±${best[1].avg.toFixed(1)}° on the daily ${word}). Past hours use each model's latest run, so real multi-day forecasts miss by more.</div>` : ""}`;
   if (opt.fs) return `
     <div class="fsl">
       <div class="fsc">${gsumHtml}${svgHtml}</div>
