@@ -643,7 +643,9 @@ function cached(key, ttlSec, fn) {
   return memoize(key, async () => {
     if (hasRedis()) { try { const v = await redis("GET", key); if (v) return JSON.parse(v); } catch {} }
     const val = await fn();
-    if (val != null && hasRedis()) redis("SET", key, JSON.stringify(val), "EX", String(ttlSec)).catch(() => {});
+    // A result can ask for a shorter life (e.g. "not enough data yet" should be retried soon)
+    const ttl = val && val._ttl ? val._ttl : ttlSec;
+    if (val != null && hasRedis()) redis("SET", key, JSON.stringify(val), "EX", String(ttl)).catch(() => {});
     return val;
   });
 }
@@ -698,14 +700,14 @@ async function observedDaily(code, offset, unit, kind) {
 
 // Score every model at this airport and choose/weight the best ones (cached 12 h)
 function stationSkill(st, code, unit, kind) {
-  return cached(`skill:v1:${code}:${unit}:${kind}`, 12 * 3600, async () => {
-    if (!/^[A-Z]{4}$/.test(code) && code !== "HKO") return { days: 0, leads: {}, reason: "No airport reports for this station" };
+  return cached(`skill:v2:${code}:${unit}:${kind}`, 12 * 3600, async () => {
+    if (!/^[A-Z]{4}$/.test(code) && code !== "HKO") return { days: 0, leads: {}, reason: "No airport reports for this station", _ttl: 3600 };
     const pr = await previousRunsDaily(st[0], st[1], unit, kind);
     const obs = await observedDaily(code, pr.offset, unit, kind);
     const localToday = new Date(Date.now() + pr.offset * 1000).toISOString().slice(0, 10);
     const days = Object.keys(obs).filter(d => d < localToday && obs[d].n >= MIN_REPORTS).sort().slice(-SMART_DAYS);
     const res = { days: days.length, dates: days, leads: {}, at: new Date().toISOString() };
-    if (days.length < MIN_DAYS) { res.reason = "Not enough complete days of airport reports yet"; return res; }
+    if (days.length < MIN_DAYS) { res.reason = code === "HKO" ? "Not enough Observatory daily reports yet" : "Not enough complete days of airport reports yet"; res._ttl = 3600; return res; }
     for (const L of [1, 2]) {
       const stats = {};
       for (const id of ["best_match", ...SMART_IDS]) {
@@ -742,6 +744,7 @@ function stationSkill(st, code, unit, kind) {
         models: Object.fromEntries(Object.entries(stats).map(([id, S]) => [id, { bias: S.bias, rawMiss: S.rawMiss, n: S.n }]))
       };
     }
+    if (!Object.keys(res.leads).length) res._ttl = 3600;
     return res;
   });
 }
