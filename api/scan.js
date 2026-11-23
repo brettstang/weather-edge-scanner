@@ -1108,7 +1108,7 @@ async function graphOne(slug, days = 1) {
 
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
 
-export { stationSkill };
+export { stationSkill, previousRunsDaily, observedHourly, stationObs };
 
 export default async function handler(req, res) {
   const q = req.query || {};
