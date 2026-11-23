@@ -777,7 +777,7 @@ async function observedDaily(code, offset, unit, kind) {
 
 // Score every model at this airport and choose/weight the best ones (cached 12 h)
 function stationSkill(st, code, unit, kind) {
-  return cached(`skill:v6:${code}:${unit}:${kind}`, 12 * 3600, async () => {
+  return cached(`skill:v7:${code}:${unit}:${kind}`, 12 * 3600, async () => {
     if (!/^[A-Z]{4}$/.test(code) && code !== "HKO") return { days: 0, leads: {}, reason: "No airport reports for this station", _ttl: 3600 };
     const pr = await previousRunsDaily(st[0], st[1], unit, kind);
     const obs = await observedDaily(code, pr.offset, unit, kind);
@@ -827,15 +827,25 @@ function stationSkill(st, code, unit, kind) {
         models: Object.fromEntries(Object.entries(stats).map(([id, S]) => [id, { bias: S.bias, rawMiss: S.rawMiss, n: S.n }]))
       };
     }
-    // Hour-of-day corrections for the Smart line (airports only; the Observatory has no hourly history here)
-    if (code !== "HKO" && res.leads[1] && pr.hourly) {
+    // The Smart LINE (hour by hour) gets its own models: the ones that track this airport's readings best
+    // through the whole day, tested on days they didn't learn from. (The daily value keeps the models that
+    // are best at the high/low itself.) If no mix beats the plain blend, the line follows the blend.
+    if (code !== "HKO" && pr.hourly) {
       const obsH = observedHourly(await stationObs(code), pr.offset, unit);
-      const chosen = res.leads[1].chosen;
-      const check = chooseHourlyStrength(pr.hourly, obsH, chosen);
-      if (check) {
-        res.hourly = check;
-        res.hourBias = {};
-        for (const c of chosen) if (pr.hourly[c.id]) res.hourBias[c.id] = hourOfDayBias(pr.hourly[c.id], obsH);
+      const cands = ["best_match", ...SMART_IDS].filter(id => pr.hourly[id])
+        .map(id => ({ id, ...(chooseHourlyStrength(pr.hourly, obsH, [{ id, w: 1 }]) || {}) }))
+        .filter(c => c.miss != null).sort((a, b) => a.miss - b.miss);
+      if (cands.length) {
+        const top = cands.filter(c => c.miss <= cands[0].miss * 1.15 + 0.2).slice(0, 4);
+        const mix = top.map(c => ({ id: c.id, w: 1 / (c.miss ** 2 + 0.1) }));
+        const mixCheck = chooseHourlyStrength(pr.hourly, obsH, mix);
+        const single = cands[0];
+        const useMix = mixCheck && mix.length > 1 && mixCheck.miss < single.miss;
+        const lineModels = useMix ? mix : [{ id: single.id, w: 1 }];
+        const check = useMix ? mixCheck : single;
+        const wsum = lineModels.reduce((a, c) => a + c.w, 0);
+        res.hourly = { strength: check.strength, miss: check.miss, uncorrectedMiss: check.uncorrectedMiss, blendMiss: check.blendMiss, hours: check.hours };
+        res.line = lineModels.map(c => ({ id: c.id, w: r1(c.w / wsum * 100) / 100, hb: hourOfDayBias(pr.hourly[c.id], obsH) }));
       }
     }
     if (!Object.keys(res.leads).length) res._ttl = 3600;
@@ -882,7 +892,8 @@ async function smartFor(st, code, unit, kind, date, localToday) {
     used: used.map(c => ({ id: c.id, name: MODEL_NAME[c.id] || c.id, w: r1(c.w / ws * 100) / 100, bias: c.bias, miss: c.miss, raw: r1(today[c.id]),
       hb: skill.hourBias && skill.hourBias[c.id] ? skill.hourBias[c.id] : null })),
     smartMiss: L.smartMiss, blendMiss: L.blendMiss,
-    hourly: skill.hourly || null      // { strength, miss, uncorrectedMiss, blendMiss, hours }
+    hourly: skill.hourly || null,     // { strength, miss, uncorrectedMiss, blendMiss, hours }
+    line: skill.line || null          // models + hour-of-day corrections for the hourly Smart line
   };
 }
 
@@ -1131,13 +1142,15 @@ async function graphOne(slug, days = 1) {
       const looCache = {};
       const looBias = (id, d) => { const k = id + d; if (!(k in looCache)) looCache[k] = pr && pr.hourly[id] ? hourOfDayBias(pr.hourly[id], obsH, d) : null; return looCache[k]; };
       const byId = Object.fromEntries(models.map(m => [m.id, new Map(m.points.map(p => [p.m, p.v]))]));
-      const total = sm.used.reduce((a, u) => a + u.w, 0);
+      byId.best_match = new Map(forecast.map(p => [p.m, p.v]));
+      const lineModels = sm.line && sm.line.length ? sm.line : sm.used;   // hourly-skill models when learned
+      const total = lineModels.reduce((a, u) => a + u.w, 0);
       const minutes = [...new Set(models.flatMap(m => m.points.map(p => p.m)))].sort((a, b) => a - b);
       let points = [];
       for (const mm of minutes) {
         const hr = Math.floor(mm / 60) % 24, isPast = mm < pastEnd && pr;
         let num = 0, den = 0;
-        for (const u of sm.used) {
+        for (const u of lineModels) {
           const v = byId[u.id] && byId[u.id].get(mm); if (v == null) continue;
           const hb = isPast ? looBias(u.id, toKey(mm).slice(0, 10)) : u.hb;
           const corr = hb && hb[hr] != null ? hb[hr] * strength : 0;
@@ -1151,7 +1164,7 @@ async function graphOne(slug, days = 1) {
         const e = ahead.reduce((a, p) => !a || (kind === "low" ? p.v < a.v : p.v > a.v) ? p : a, null);
         const delta = e ? sm.value - e.v : 0;
         points = points.map(p => ({ m: p.m, v: Math.round((p.v + (e && p.m >= Math.max(dayStart, pastEnd) ? delta * Math.exp(-(((p.m - e.m) / 180) ** 2)) : 0)) * 10) / 10 }));
-        smart = { points, value: sm.value, used: sm.used.map(u => u.id), fallback: !!sm.fallback, hourly: sm.hourly || null };
+        smart = { points, value: sm.value, used: sm.used.map(u => u.id), lineModels: lineModels.map(u => u.id), fallback: !!sm.fallback, hourly: sm.hourly || null };
       }
     }
   } catch {}
