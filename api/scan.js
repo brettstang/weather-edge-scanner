@@ -1132,10 +1132,11 @@ async function graphOne(slug, days = 1) {
   // Same models and weights as the card. Hour-of-day corrections are applied at the strength this
   // airport's own check chose (0, 50 or 100 %). Past hours use day-ahead forecasts with corrections
   // learned WITHOUT that day, so the past part of the line is an honest test, not a fit.
-  let smart = null;
+  let smart = null, smartError = null;
   try {
     const localToday = new Date(Date.now() + off * 1000).toISOString().slice(0, 10);
     const sm = date >= localToday ? await smartFor(st, code, unit, kind, date, localToday) : null;
+    if (!sm) smartError = date < localToday ? "market day has passed" : "no Smart forecast";
     if (sm && sm.used && sm.used.length) {
       const strength = sm.hourly ? sm.hourly.strength : 0;
       const obsH = pr ? observedHourly(await stationObs(code), off, unit) : null;
@@ -1167,10 +1168,10 @@ async function graphOne(slug, days = 1) {
         smart = { points, value: sm.value, used: sm.used.map(u => u.id), lineModels: lineModels.map(u => u.id), fallback: !!sm.fallback, hourly: sm.hourly || null };
       }
     }
-  } catch {}
+  } catch (e) { smartError = String(e && e.stack || e).slice(0, 300); }
   const pastAhead = !!pr;
   const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
-  return { city, date, dates, days, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, models, smart, observed, nowMin, lowEdge, highEdge, pastAhead };
+  return { city, date, dates, days, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, models, smart, smartError, observed, nowMin, lowEdge, highEdge, pastAhead };
 }
 
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
