@@ -472,8 +472,11 @@ setInterval(() => document.querySelectorAll(".lt[data-tz]").forEach(el => { el.q
 
 function obsLine(o, unit, extra, k = kind) {
   if (!o) return "";
-  return `<div class="obs">📡<div>Observed ${k === "low" ? "low" : "high"} so far today: <b>${Math.round(o.value * 10) / 10}°${unit}</b> at ${esc(o.at)}
-    <span style="color:var(--muted)">· ${o.count} airport report${o.count === 1 ? "" : "s"} (aviationweather.gov)</span>${extra ? `<br>${extra}` : ""}</div></div>`;
+  const src = o.source === "hko"
+    ? `official Hong Kong Observatory reading${o.asOf ? `, as of ${esc(o.asOf)} HKT` : ""}`
+    : `${o.count} airport report${o.count === 1 ? "" : "s"} (aviationweather.gov)`;
+  return `<div class="obs">${o.source === "hko" ? "🏛️" : "📡"}<div>Observed ${k === "low" ? "low" : "high"} so far today: <b>${Math.round(o.value * 10) / 10}°${unit}</b>${o.at ? ` at ${esc(o.at)}` : ""}
+    <span style="color:var(--muted)">· ${src}</span>${extra ? `<br>${extra}` : ""}</div></div>`;
 }
 
 function hitCard(h, row) {
@@ -495,7 +498,7 @@ function hitCard(h, row) {
         return beyond ? (lo ? "Low so far" : "High so far") : "Open-Meteo " + w; })()}</small>${Math.round(h.forecast * 10) / 10}°<span style="font-size:22px">${h.unit}</span></div>
       <div class="odds"><small>Market says</small><b>${pct(h.yesPct)}</b><div class="no">No ${pct(h.noPct)}</div></div>
     </div>
-    ${obsLine(h.observed, h.unit, h.locked ? "The airport has already reached this edge today."
+    ${obsLine(h.observed, h.unit, h.locked ? (h.observed && h.observed.source === "hko" ? "The Observatory has already reached this edge today." : "The airport has already reached this edge today.")
         : h.forecastModel != null && Math.abs(h.forecastModel - h.forecast) > 0.05 ? `Already ${h.kind === "low" ? "below" : "above"} the model forecast of ${Math.round(h.forecastModel * 10) / 10}°.` : "", h.kind)}
     ${bar(low, high, h.forecast, h.unit, h.smart ? (h.smart.adjusted ?? h.smart.value) : null)}
     ${triggerLine(h)}
@@ -793,7 +796,7 @@ function dayGraph(g, opt = {}) {
   const gid = "g" + Math.random().toString(36).slice(2, 9);
   GRAPHS[gid] = { g, W, H, L, R, T, B, lo, hi, x, y, models };
   const legend = [
-    ...(onDay(g.observed).length ? [{ key: "obs", name: "Airport", color: "#ffffff", val: extOf(onDay(g.observed))?.v }] : []),
+    ...(onDay(g.observed).length ? [{ key: "obs", name: g.station === "HKO" ? "Observatory" : "Airport", color: "#ffffff", val: extOf(onDay(g.observed))?.v }] : []),
     { key: "blend", name: "Blend", color: "rgba(255,255,255,.55)", val: extOf(onDay(g.forecast))?.v, dash: true, miss: miss.blend },
     ...models.map(m => ({ key: m.id, name: SHORT[m.id] || m.name, color: MODEL_COLORS[m.id] || "#aaa", val: extOf(onDay(m.points))?.v, miss: miss[m.id] }))
   ];
@@ -879,7 +882,7 @@ function drawCrosshair(box, minute) {
     rows.push({ k, p });
   }
   box.querySelector(".xh").innerHTML = `<line x1="${x(minute)}" x2="${x(minute)}" y1="${T}" y2="${H - B}" stroke="rgba(255,255,255,.6)" stroke-width="1"/>${dots}`;
-  const name = k => LABEL[k] || SHORT[k] || k;
+  const name = k => k === "obs" && g.station === "HKO" ? "Observatory" : LABEL[k] || SHORT[k] || k;
   const ro = box.querySelector(".readout");
   if (sel) {
     const r = rows[0];

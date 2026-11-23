@@ -247,6 +247,7 @@ export function parseMetar(o) {
   return { time, c, special };
 }
 function stationObs(code, hours = 168) {
+  if (code === "HKO") return hkoReadings().catch(() => null);
   if (!/^[A-Z]{4}$/.test(code)) return Promise.resolve(null);
   const ck = `${code},${hours}`;
   const get = h => getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=${h}`)
@@ -257,6 +258,77 @@ function stationObs(code, hours = 168) {
     .catch(() => hours > 36 ? get(36).catch(() => null) : null);
   return obsCache[ck];
 }
+// ---------- Hong Kong Observatory (HKO): official readings, since there is no METAR for it ----------
+// Polymarket's Hong Kong markets settle on the Observatory HQ in Tsim Sha Tsui, not the airport.
+const HKO_API = "https://data.weather.gov.hk/weatherAPI";
+async function getText(url) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error(`${r.status} from ${url}`);
+  return r.text();
+}
+// Latest reading + max/min since midnight (updated every 10 min). Each call also records the
+// reading in Redis, building the Observatory's own reading history for graphs and today's track.
+function hkoNow() {
+  return memoize("hko:now", async () => {
+    const pick = csv => csv.split(/\r?\n/).map(l => l.split(",")).find(c => /observatory/i.test(c[1] || ""));
+    const [mm, cur] = await Promise.all([
+      getText(`${HKO_API}/hko_data/regional-weather/latest_since_midnight_maxmin.csv`),
+      getText(`${HKO_API}/hko_data/regional-weather/latest_1min_temperature.csv`).catch(() => "")
+    ]);
+    const a = pick(mm), b = pick(cur);
+    if (!a) return null;
+    const dt = a[0].trim();
+    const date = `${dt.slice(0, 4)}-${dt.slice(4, 6)}-${dt.slice(6, 8)}`, at = `${dt.slice(8, 10)}:${dt.slice(10, 12)}`;
+    const time = Date.UTC(+dt.slice(0, 4), +dt.slice(4, 6) - 1, +dt.slice(6, 8), +dt.slice(8, 10) - 8, +dt.slice(10, 12));
+    const res = { date, at, time, max: parseFloat(a[2]), min: parseFloat(a[3]), temp: b ? parseFloat(b[2]) : null };
+    if (hasRedis() && res.temp != null && Number.isFinite(res.temp)) {
+      redis("HSET", `hko:obs:${date}`, String(time), String(res.temp)).catch(() => {});
+      redis("EXPIRE", `hko:obs:${date}`, String(16 * 86400)).catch(() => {});
+    }
+    return res;
+  });
+}
+// Official daily high/low for a finished day ("Yesterday's Weather" report, published ~01:30 HKT)
+function hkoDay(date) {
+  return cached(`hko:ryes:${date}`, 40 * 86400, async () => {
+    const ymd = date.replace(/-/g, "");
+    const j = await getJSON(`${HKO_API}/opendata/opendata.php?dataType=RYES&date=${ymd}&lang=en&station=HKO`);
+    const max = parseFloat(j.HKOReadingsMaxTemp), min = parseFloat(j.HKOReadingsMinTemp);
+    return j.ReportTimeInfoDate === ymd && Number.isFinite(max) && Number.isFinite(min) ? { max, min } : null;
+  }).catch(() => null);
+}
+// Recorded Observatory readings for the past week (for graphs and the shape of today)
+function hkoReadings() {
+  return memoize("hko:readings", async () => {
+    const now = await hkoNow().catch(() => null);
+    const out = [];
+    if (hasRedis()) {
+      const today = now ? now.date : new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+      const dates = Array.from({ length: 8 }, (_, i) => new Date(Date.parse(today + "T12:00:00Z") - i * 86400000).toISOString().slice(0, 10));
+      const rows = await Promise.all(dates.map(d => redis("HGETALL", `hko:obs:${d}`).catch(() => null)));
+      for (const r of rows) for (let i = 0; r && i < r.length; i += 2) out.push({ time: +r[i], c: parseFloat(r[i + 1]) });
+    }
+    if (now && now.temp != null && !out.some(o => o.time === now.time)) out.push({ time: now.time, c: now.temp });
+    return out.filter(o => Number.isFinite(o.c)).sort((a, b) => a.time - b.time);
+  });
+}
+// Today's observed summary for any station: METARs for airports, official readings for the Observatory
+async function observedNow(code, offsetSec, date, unit) {
+  const ob = observedToday(await stationObs(code), offsetSec, date, unit);
+  if (code !== "HKO") return ob;
+  const now = await hkoNow().catch(() => null);
+  if (!now || now.date !== date) return ob;
+  const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
+  // Official max/min since midnight beats our sparse recorded readings
+  const base = ob || { hourly: new Array(24).fill(null), low: new Array(24).fill(null), count: 0,
+    nowHour: new Date(Date.now() + offsetSec * 1000).getUTCHours() };
+  const max = conv(now.max), min = conv(now.min);
+  return { ...base, max: Math.round(max * 10) / 10, min: Math.round(min * 10) / 10,
+    maxHour: base.max != null && base.max >= max - 0.05 ? base.maxHour : null,
+    minHour: base.min != null && base.min <= min + 0.05 ? base.minHour : null,
+    count: Math.max(base.count || 0, 1), source: "hko", asOf: now.at };
+}
+
 // Summarise today's observations in the station's local time and the market's unit.
 export function observedToday(obs, offsetSec, date, unit) {
   if (!obs || !obs.length) return null;
@@ -399,13 +471,15 @@ async function nightScan(events, t0, kind = "high") {
     // Today: replace hours already passed with what the airport actually recorded
     let observed = null;
     if (date === localToday) {
-      const ob = observedToday(await stationObs(code), data.utc_offset_seconds || 0, date, unit);
+      const ob = await observedNow(code, data.utc_offset_seconds || 0, date, unit);
       if (ob) {
         for (let hr = 0; hr <= ob.nowHour; hr++) if (ob.hourly[hr] != null) {
           const o = hi ? ob.hourly[hr] : ob.low[hr];
           temps[hr] = hr < ob.nowHour ? o : (hi ? Math.max(temps[hr] ?? -Infinity, o) : Math.min(temps[hr] ?? Infinity, o));
         }
-        observed = { value: hi ? ob.max : ob.min, at: hh(hi ? ob.maxHour : ob.minHour), count: ob.count, nowHour: ob.nowHour };
+        const ohr = hi ? ob.maxHour : ob.minHour;
+        observed = { value: hi ? ob.max : ob.min, at: ohr != null ? hh(ohr) : null, count: ob.count, nowHour: ob.nowHour,
+          source: ob.source || "metar", asOf: ob.asOf || null };
       }
     }
     // peak = the day's extreme (max for highs, min for lows); dayMax = the most extreme value OUTSIDE the window
@@ -541,6 +615,7 @@ function settlementLink(ev) {
   const m = text.match(/https?:\/\/(?:www\.)?wunderground\.com\/[^\s"')<]+/);
   if (m) return m[0].replace(/[.,;]+$/, "");
   const code = findStation(ev);
+  if (code === "HKO") return "https://www.hko.gov.hk/textonly/v2/forecast/text_readings_e.htm";
   return code && /^[A-Z]{4}$/.test(code) ? `https://aviationweather.gov/data/metar/?id=${code}&hours=24` : null;
 }
 
@@ -602,6 +677,15 @@ async function previousRunsDaily(lat, lon, unit, kind) {
 
 // Actual daily high/low at the airport from routine reports (complete days only)
 async function observedDaily(code, offset, unit, kind) {
+  if (code === "HKO") {
+    const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
+    const today = new Date(Date.now() + offset * 1000).toISOString().slice(0, 10);
+    const dates = Array.from({ length: SMART_DAYS + 1 }, (_, i) => addDaysIso(today, -(i + 1)));
+    const vals = await Promise.all(dates.map(hkoDay));
+    const days = {};
+    dates.forEach((d, i) => { if (vals[i]) days[d] = { ext: conv(kind === "low" ? vals[i].min : vals[i].max), n: 99 }; });
+    return days;
+  }
   const obs = await stationObs(code);
   const conv = c => unit === "C" ? c : c * 9 / 5 + 32;
   const days = {};
@@ -615,7 +699,7 @@ async function observedDaily(code, offset, unit, kind) {
 // Score every model at this airport and choose/weight the best ones (cached 12 h)
 function stationSkill(st, code, unit, kind) {
   return cached(`skill:v1:${code}:${unit}:${kind}`, 12 * 3600, async () => {
-    if (!/^[A-Z]{4}$/.test(code)) return { days: 0, leads: {}, reason: "No airport reports for this station" };
+    if (!/^[A-Z]{4}$/.test(code) && code !== "HKO") return { days: 0, leads: {}, reason: "No airport reports for this station" };
     const pr = await previousRunsDaily(st[0], st[1], unit, kind);
     const obs = await observedDaily(code, pr.offset, unit, kind);
     const localToday = new Date(Date.now() + pr.offset * 1000).toISOString().slice(0, 10);
@@ -735,8 +819,10 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
       // Today: the high can't end up below what the airport has already recorded
       let obsNow = null;
       if (f && date === f.localToday) {
-        obsNow = observedToday(await stationObs(code), f.offset, date, b.unit);
-        if (obsNow) row.observed = { value: hi ? obsNow.max : obsNow.min, at: hh(hi ? obsNow.maxHour : obsNow.minHour), count: obsNow.count };
+        obsNow = await observedNow(code, f.offset, date, b.unit);
+        if (obsNow) { const hr = hi ? obsNow.maxHour : obsNow.minHour;
+          row.observed = { value: hi ? obsNow.max : obsNow.min, at: hr != null ? hh(hr) : null, count: obsNow.count,
+            source: obsNow.source || "metar", asOf: obsNow.asOf || null }; }
       }
       const fcModel = fc;
       // The day's high can't end below what's been recorded; the day's low can't end above it
