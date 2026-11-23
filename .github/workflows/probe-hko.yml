@@ -1,0 +1,20 @@
+# Temporary: measure the Smart line against real readings (will be removed)
+name: Probe HKO
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          B=https://weather-edge-scanner.vercel.app/api/scan
+          curl -sS --max-time 90 "$B?kind=low&near=1" > low.json
+          for city in Denver NYC Chicago; do
+            slug=$(jq -r --arg c "$city" '[.overview[] | select(.city==$c)][-1].slug' low.json)
+            [ "$slug" = "null" ] && continue
+            curl -sS --max-time 90 "$B?mode=graph&days=4&slug=$slug" > g.json
+            jq -r --arg c "$city" '
+              def near(pts; m): [pts[] | select(.m == m)][0].v;
+              . as $g | ($g.observed | map(select(.m < (($g.days-1)*1440)))) as $obs |
+              [ $obs[] | (((.m/60)|round)*60) as $m | {o:.v, s:near($g.smart.points; $m), b:near($g.forecast; $m)} | select(.s != null and .b != null) ] as $pairs |
+              "RESULT \($c) low-market graph: hourly hours=\($pairs|length)  Smart avg miss=\(([$pairs[]|(.s-.o)|fabs]|add/length*10|round/10))°  Open-Meteo blend avg miss=\(([$pairs[]|(.b-.o)|fabs]|add/length*10|round/10))°  hourly-corrected=\($g.smart.hourly)"' g.json
+          done
