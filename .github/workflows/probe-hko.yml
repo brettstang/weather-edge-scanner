@@ -1,4 +1,4 @@
-# Temporary: check Hong Kong rows in the live app (will be removed)
+# Temporary: check METAR history depth for a few airports (will be removed)
 name: Probe HKO
 on: workflow_dispatch
 jobs:
@@ -6,9 +6,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          for k in high low; do
-            echo "== $k =="
-            curl -sS --max-time 90 "https://weather-edge-scanner.vercel.app/api/scan?kind=$k&near=1" > out.json
-            jq -c '.overview[] | select(.station=="HKO") | {city,date,forecast,observed,smart:(.smart|{value,adjusted,fallback,reason,days,smartMiss,blendMiss,used:[.used[]?|.id]})}' out.json
-            echo "fallback markets:"; jq -c '[.overview[] | select(.smart.fallback==true) | "\(.city) \(.date) \(.station) - \(.smart.reason)"]' out.json
+          for id in KDEN MMMX OEJN LTAC NZWN KORD; do
+            curl -sS --max-time 30 "https://aviationweather.gov/api/data/metar?ids=$id&format=json&hours=168" > m.json
+            echo "$id total=$(jq length m.json) routine=$(jq '[.[]|select(.metarType=="METAR")]|length' m.json) speci=$(jq '[.[]|select(.metarType=="SPECI")]|length' m.json) oldest=$(jq -r '[.[].reportTime]|min' m.json) newest=$(jq -r '[.[].reportTime]|max' m.json) withRMK_T=$(jq '[.[]|select(.rawOb|test(" RMK .* T[01][0-9]{3}"))]|length' m.json) types=$(jq -c '[.[].metarType]|unique' m.json)"
           done
+          echo "sample:"; jq -c '.[0] | {metarType, reportTime, obsTime, temp, rawOb}' m.json
