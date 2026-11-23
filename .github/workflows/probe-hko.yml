@@ -1,0 +1,16 @@
+# Temporary: inspect Hong Kong Observatory open-data formats (will be removed)
+name: Probe HKO
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          D=$(TZ=Asia/Hong_Kong date -d yesterday +%Y%m%d)
+          echo "== RYES $D =="; curl -sS "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php?dataType=RYES&date=$D&lang=en&station=HKO" | head -c 1500; echo
+          echo "== RYES no station =="; curl -sS "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php?dataType=RYES&date=$D&lang=en" | tr ',' '\n' | grep -i "temp\|date" | head -20; echo
+          echo "== since midnight =="; curl -sS https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_since_midnight_maxmin.csv | head -4
+          echo "== 1min temp =="; curl -sS https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv | head -4
+          echo "== grep observatory =="; curl -sS https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_since_midnight_maxmin.csv | grep -i observ
+          curl -sS https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv | grep -i observ
+          echo "== rhrread =="; curl -sS "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en" | head -c 600; echo
