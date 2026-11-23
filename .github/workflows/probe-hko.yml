@@ -1,0 +1,14 @@
+# Temporary: check Hong Kong rows in the live app (will be removed)
+name: Probe HKO
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for k in high low; do
+            echo "== $k =="
+            curl -sS --max-time 90 "https://weather-edge-scanner.vercel.app/api/scan?kind=$k&near=1" > out.json
+            jq -c '.overview[] | select(.station=="HKO") | {city,date,forecast,observed,smart:(.smart|{value,adjusted,fallback,reason,days,smartMiss,blendMiss,used:[.used[]?|.id]})}' out.json
+            echo "fallback markets:"; jq -c '[.overview[] | select(.smart.fallback==true) | "\(.city) \(.date) \(.station) - \(.smart.reason)"]' out.json
+          done
