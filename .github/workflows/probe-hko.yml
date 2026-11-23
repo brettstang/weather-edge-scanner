@@ -1,0 +1,14 @@
+# Temporary: verify Smart learning in the live app (will be removed)
+name: Probe HKO
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for pass in 1 2; do for k in high low; do
+            s=$(date +%s); curl -sS --max-time 90 "https://weather-edge-scanner.vercel.app/api/scan?kind=$k&near=1" > out.json; e=$(( $(date +%s) - s ))
+            echo "RESULT pass$pass $k ${e}s: $(jq -c '{markets:(.overview|length), partial, smart:.smartStats}' out.json)"
+            jq -r '.overview[] | select(.station=="HKO") | "RESULT   HK \(.date) learned=\(.smart.fallback|not) days=\(.smart.days) smart=\(.smart.value) om=\(.forecast) miss=\(.smart.smartMiss)/\(.smart.blendMiss)"' out.json
+            jq -r '[.overview[] | select(.smart.fallback==true) | "\(.city): \(.smart.reason)"] | unique | .[] | "RESULT   fallback " + .' out.json
+          done; done
