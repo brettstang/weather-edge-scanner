@@ -739,7 +739,7 @@ function renderSun(data) {
 
 // ---------- Day graph ----------
 const MODEL_COLORS = {
-  ecmwf_ifs025: "#4cc9f0", gfs_seamless: "#f72585", gem_seamless: "#ffd166", icon_seamless: "#b388ff",
+  ecmwf_ifs025: "#4cc9f0", gfs_seamless: "#f72585", gem_seamless: "#ffd166", icon_seamless: "#8ac926",
   ukmo_seamless: "#ff9f43", meteofrance_seamless: "#2ec4b6", jma_seamless: "#ff6b6b"
 };
 const shortDay = d => { const t = new Date(d + "T12:00:00Z"); return ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][t.getUTCDay()] + " " + t.getUTCDate(); };
@@ -747,7 +747,7 @@ const SHORT = { ecmwf_ifs025: "ECMWF", gfs_seamless: "GFS", gem_seamless: "GEM",
 function dayGraph(g, opt = {}) {
   const W = opt.W || 340, H = opt.H || 230, L = 34, R = 10, T = 14, B = 26;
   const models = g.models || [];
-  const pts = [...g.forecast.map(p => p.v), ...g.observed.map(p => p.v), ...models.flatMap(m => m.points.map(p => p.v))];
+  const pts = [...g.forecast.map(p => p.v), ...g.observed.map(p => p.v), ...models.flatMap(m => m.points.map(p => p.v)), ...(g.smart ? g.smart.points.map(p => p.v) : [])];
   if (!pts.length) return `<div class="gsum">No hourly data for this day yet.</div>`;
   let lo = Math.min(...pts), hi = Math.max(...pts);
   for (const e of [g.lowEdge, g.highEdge]) if (e != null && e >= lo - 6 && e <= hi + 6) { lo = Math.min(lo, e); hi = Math.max(hi, e); }
@@ -792,16 +792,18 @@ function dayGraph(g, opt = {}) {
       if (errs.length) miss[key] = { avg: errs.reduce((a, b) => a + b, 0) / errs.length, n: errs.length };
     };
     score("blend", g.forecast); models.forEach(m => score(m.id, m.points));
+    if (g.smart) score("smart", g.smart.points);
   }
   const gid = "g" + Math.random().toString(36).slice(2, 9);
   GRAPHS[gid] = { g, W, H, L, R, T, B, lo, hi, x, y, models };
   const legend = [
+    ...(g.smart ? [{ key: "smart", name: "🧠 Smart", color: SMART_COLOR, val: g.smart.value, miss: miss.smart }] : []),
     ...(onDay(g.observed).length ? [{ key: "obs", name: g.station === "HKO" ? "Observatory" : "Airport", color: "#ffffff", val: extOf(onDay(g.observed))?.v }] : []),
     { key: "blend", name: "Blend", color: "rgba(255,255,255,.55)", val: extOf(onDay(g.forecast))?.v, dash: true, miss: miss.blend },
     ...models.map(m => ({ key: m.id, name: SHORT[m.id] || m.name, color: MODEL_COLORS[m.id] || "#aaa", val: extOf(onDay(m.points))?.v, miss: miss[m.id] }))
   ];
   const best = Object.entries(miss).sort((a, b) => a[1].avg - b[1].avg)[0];
-  const gsumHtml = `<div class="gsum">${esc(g.city)} · ${days > 1 ? `${esc(dayName(g.dates[0]))} – ${fmtDate(g.date)}` : fmtDate(g.date)} · ${esc(g.station)}${ext ? ` · ${g.observed.includes(ext) ? "recorded" : "expected"} ${word} <b>${r1(ext.v)}°${g.unit}</b> at ${hhmm(ext.m)}` : ""}</div>`;
+  const gsumHtml = `<div class="gsum">${esc(g.city)} · ${days > 1 ? `${esc(dayName(g.dates[0]))} – ${fmtDate(g.date)}` : fmtDate(g.date)} · ${esc(g.station)}${ext ? ` · ${g.observed.includes(ext) ? "recorded" : "expected"} ${word} <b>${r1(ext.v)}°${g.unit}</b> at ${hhmm(ext.m)}` : ""}${g.smart ? ` · <span style="color:${SMART_COLOR}">🧠 Smart <b>${r1(g.smart.value)}°</b></span>` : ""}</div>`;
   const svgHtml = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Temperature graph by model" data-gid="${gid}" style="touch-action:none">
       ${grid}${hrs}
       ${edgeLine(g.lowEdge, "#5ec8ff", `≤${g.lowEdge}° edge`)}${edgeLine(g.highEdge, "#ff9f43", `≥${g.highEdge}° edge`)}
@@ -810,6 +812,11 @@ function dayGraph(g, opt = {}) {
         <text x="${x(now) + 3}" y="${T + 9}" font-size="10" fill="rgba(255,255,255,.75)">now</text>` : ""}
       ${models.map(m => `<path data-line="${m.id}" d="${path(m.points)}" fill="none" stroke="${MODEL_COLORS[m.id] || "#aaa"}" stroke-width="1.6" stroke-linejoin="round" opacity=".9"/>`).join("")}
       ${g.forecast.length > 1 ? `<path data-line="blend" d="${path(g.forecast)}" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.6" stroke-dasharray="4 3"/>` : ""}
+      ${g.smart && g.smart.points.length > 1 ? `<g data-line="smart">
+        <path d="${path(g.smart.points)}" fill="none" stroke="rgba(10,8,30,.75)" stroke-width="7" stroke-linejoin="round"/>
+        <path d="${path(g.smart.points)}" fill="none" stroke="${SMART_COLOR}" stroke-width="3.6" stroke-linejoin="round" style="filter:drop-shadow(0 0 4px rgba(192,132,252,.8))"/>
+        ${(() => { const last = g.smart.points[g.smart.points.length - 1]; return `<text x="${Math.min(x(last.m) - 2, W - R - 2)}" y="${y(last.v) + (low ? 14 : -7)}" text-anchor="end" font-size="10.5" font-weight="800" fill="${SMART_COLOR}">🧠 Smart</text>`; })()}
+      </g>` : ""}
       <g data-line="obs">
         ${g.observed.length > 1 ? `<path d="${path(g.observed)}" fill="none" stroke="rgba(0,0,0,.55)" stroke-width="5"/><path d="${path(g.observed)}" fill="none" stroke="#fff" stroke-width="2.6"/>` : ""}
         ${g.observed.map(p => `<circle cx="${x(p.m)}" cy="${y(p.v)}" r="2.4" fill="#fff"/>`).join("")}
@@ -820,7 +827,7 @@ function dayGraph(g, opt = {}) {
     </svg>`;
   const restHtml = `
     <div class="readout">Tap or drag on the graph to read temperatures by hour.</div>
-    <div class="glh">${days > 1 ? `${esc(dayName(g.date))} ${word} by source · ±° = avg miss vs airport, past days` : `Day's ${word} by source${g.observed.length ? " · Airport = recorded so far" : ""}`}</div>
+    <div class="glh">${days > 1 ? `${esc(dayName(g.date))} ${word} by source · ±° = avg miss vs airport, past days` : `Day's ${word} by source${g.observed.length ? ` · ${g.station === "HKO" ? "Observatory" : "Airport"} = recorded so far` : ""}`}</div>
     <div class="gleg2">${legend.map(l => `
       <button class="li" data-key="${l.key}"><i style="background:${l.color}${l.dash ? ";background-image:repeating-linear-gradient(90deg,transparent 0 3px,#14162b 3px 5px)" : ""}"></i>
         <span>${esc(l.name)}${l.miss ? `<small class="miss${best && best[0] === l.key ? " best" : ""}">${best && best[0] === l.key ? "★ " : ""}±${l.miss.avg.toFixed(1)}°<span class="mw"> miss</span></small>` : ""}</span><b>${l.val != null ? `${r1(l.val)}°` : ""}</b></button>`).join("")}
@@ -838,13 +845,15 @@ function dayGraph(g, opt = {}) {
 
 // ---------- Interactive graph: highlight a source, read values by hour ----------
 const GRAPHS = {};
-const LABEL = { obs: "Airport", blend: "Blend" };
+const LABEL = { obs: "Airport", blend: "Blend", smart: "🧠 Smart" };
+const SMART_COLOR = "#c084fc";
 function seriesOf(G, key) {
   if (key === "obs") return G.g.observed;
   if (key === "blend") return G.g.forecast;
+  if (key === "smart") return G.g.smart ? G.g.smart.points : [];
   return (G.models.find(m => m.id === key) || {}).points || [];
 }
-function colorOf(key) { return key === "obs" ? "#ffffff" : key === "blend" ? "rgba(255,255,255,.75)" : MODEL_COLORS[key] || "#aaa"; }
+function colorOf(key) { return key === "obs" ? "#ffffff" : key === "smart" ? SMART_COLOR : key === "blend" ? "rgba(255,255,255,.75)" : MODEL_COLORS[key] || "#aaa"; }
 function valueAt(G, key, minute) {
   const pts = seriesOf(G, key);
   if (!pts.length) return null;
@@ -871,7 +880,7 @@ function drawCrosshair(box, minute) {
   const { x, y, T, H, B, g } = G;
   const unit = "°" + g.unit, r1 = v => Math.round(v * 10) / 10;
   const sel = box.dataset.sel || "";
-  const keys = sel ? [sel] : [...(g.observed.length ? ["obs"] : []), "blend", ...G.models.map(m => m.id)];
+  const keys = sel ? [sel] : [...(g.smart ? ["smart"] : []), ...(g.observed.length ? ["obs"] : []), "blend", ...G.models.map(m => m.id)];
   const dn = shortDay;
   const hhmm = m => `${(g.days || 1) > 1 ? dn(g.dates[Math.min(g.days - 1, Math.floor(m / 1440))]) + " " : ""}${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
   let dots = "", rows = [];

@@ -1027,8 +1027,33 @@ async function graphOne(slug, days = 1) {
     }
     observed.sort((a, b) => a.m - b.m);
   }
+  // The Smart (learned) forecast as an hourly line: the same models, weights and bias corrections
+  // as the card's Smart value, then shifted so its peak (or low) on the market day equals that value.
+  let smart = null;
+  try {
+    const localToday = new Date(Date.now() + off * 1000).toISOString().slice(0, 10);
+    const sm = date >= localToday ? await smartFor(st, code, unit, kind, date, localToday) : null;
+    if (sm && sm.used && sm.used.length) {
+      const byId = Object.fromEntries(models.map(m => [m.id, new Map(m.points.map(p => [p.m, p.v]))]));
+      const total = sm.used.reduce((a, u) => a + u.w, 0);
+      const minutes = [...new Set(models.flatMap(m => m.points.map(p => p.m)))].sort((a, b) => a - b);
+      let points = [];
+      for (const mm of minutes) {
+        let num = 0, den = 0;
+        for (const u of sm.used) { const v = byId[u.id] && byId[u.id].get(mm); if (v != null) { num += u.w * (v - u.bias); den += u.w; } }
+        if (den >= total * 0.6) points.push({ m: mm, v: num / den });
+      }
+      const day = points.filter(p => p.m >= (days - 1) * 1440);
+      if (day.length) {
+        const ext = kind === "low" ? Math.min(...day.map(p => p.v)) : Math.max(...day.map(p => p.v));
+        const shift = sm.value - ext;
+        points = points.map(p => ({ m: p.m, v: Math.round((p.v + shift) * 10) / 10 }));
+        smart = { points, value: sm.value, used: sm.used.map(u => u.id), fallback: !!sm.fallback };
+      }
+    }
+  } catch {}
   const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
-  return { city, date, dates, days, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, models, observed, nowMin, lowEdge, highEdge };
+  return { city, date, dates, days, unit, kind, tz: data.timezone || null, station: code, stationName: st[2], forecast, models, smart, observed, nowMin, lowEdge, highEdge };
 }
 
 const send = (res, code, body) => { res.setHeader("Cache-Control", "no-store"); return res.status(code).json(body); };
