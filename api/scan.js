@@ -103,11 +103,19 @@ async function lookupStation(code) {
   return (await loadAirports())[code] || null;
 }
 
-async function getJSON(url) {
-  const r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(8000) });
-  if (!r.ok) throw new Error(`${r.status} from ${url}`);
+async function getJSON(url, ms = 8000) {
+  const r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(ms) });
+  if (!r.ok) throw new Error(`${r.status} from ${new URL(url).host}`);
   return r.json();
 }
+// Run at most n requests of one kind at a time, so a big scan doesn't hit a service's rate limit
+function limiter(n) {
+  let active = 0; const queue = [];
+  const next = () => { if (active >= n || !queue.length) return; active++; const { fn, res, rej } = queue.shift();
+    fn().then(res, rej).finally(() => { active--; next(); }); };
+  return fn => new Promise((res, rej) => { queue.push({ fn, res, rej }); next(); });
+}
+const metarLimit = limiter(4), historyLimit = limiter(5);
 
 const KIND_RE = { high: /highest temperature in/i, low: /lowest temperature in/i };
 const kindOf = ev => KIND_RE.low.test(ev.title || "") ? "low" : "high";
@@ -250,8 +258,16 @@ function stationObs(code, hours = 168) {
   if (code === "HKO") return hkoReadings().catch(() => null);
   if (!/^[A-Z]{4}$/.test(code)) return Promise.resolve(null);
   const ck = `${code},${hours}`;
-  const get = h => getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=${h}`)
+  const fetchObs = h => metarLimit(() => getJSON(`https://aviationweather.gov/api/data/metar?ids=${code}&format=json&hours=${h}`, 15000))
     .then(list => (Array.isArray(list) ? list : []).map(parseMetar).filter(x => x.time && x.c != null && !x.special));
+  // Shared between the high/low tabs, auto-scans and every phone for 20 minutes
+  const get = async h => {
+    const key = `metar:v1:${code}:${h}`;
+    if (hasRedis()) { try { const v = await redis("GET", key); if (v) return JSON.parse(v).map(([time, c]) => ({ time, c })); } catch {} }
+    const list = await fetchObs(h);
+    if (hasRedis() && list.length) redis("SET", key, JSON.stringify(list.map(o => [o.time, o.c])), "EX", "1200").catch(() => {});
+    return list;
+  };
   // Ask for 7 days; if the service won't give that much, fall back to the last 36 hours
   if (!obsCache[ck]) obsCache[ck] = get(hours)
     .then(list => list.length || hours <= 36 ? list : get(36))
@@ -658,8 +674,11 @@ async function previousRunsDaily(lat, lon, unit, kind) {
     `&hourly=${leads.map(L => `temperature_2m_previous_day${L}`).join(",")}&models=${list.join(",")}` +
     `&past_days=${SMART_DAYS + 2}&forecast_days=1&timezone=auto&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}`;
   let d;
-  try { d = await getJSON(url(ids)); }
-  catch { ids = SMART_IDS; d = await getJSON(url(ids)); }   // retry without the blend if it isn't accepted
+  try { d = await historyLimit(() => getJSON(url(ids), 20000)); }
+  catch (e) {
+    if (/^4/.test(e.message)) { ids = SMART_IDS; d = await historyLimit(() => getJSON(url(ids), 20000)); }   // retry without the blend if it isn't accepted
+    else throw e;
+  }
   const h = d.hourly || {}, out = {};
   for (const id of ids) for (const L of leads) {
     const arr = h[`temperature_2m_previous_day${L}_${id}`];
@@ -700,7 +719,7 @@ async function observedDaily(code, offset, unit, kind) {
 
 // Score every model at this airport and choose/weight the best ones (cached 12 h)
 function stationSkill(st, code, unit, kind) {
-  return cached(`skill:v2:${code}:${unit}:${kind}`, 12 * 3600, async () => {
+  return cached(`skill:v3:${code}:${unit}:${kind}`, 12 * 3600, async () => {
     if (!/^[A-Z]{4}$/.test(code) && code !== "HKO") return { days: 0, leads: {}, reason: "No airport reports for this station", _ttl: 3600 };
     const pr = await previousRunsDaily(st[0], st[1], unit, kind);
     const obs = await observedDaily(code, pr.offset, unit, kind);
@@ -753,8 +772,8 @@ function stationSkill(st, code, unit, kind) {
 function currentModelsDaily(lat, lon, code, unit, kind) {
   return cached(`cur:v1:${code}:${unit}:${kind}`, 3 * 3600, async () => {
     const v = kind === "low" ? "temperature_2m_min" : "temperature_2m_max";
-    const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=${v}` +
-      `&models=${SMART_IDS.join(",")}&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&forecast_days=7`);
+    const d = await historyLimit(() => getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=${v}` +
+      `&models=${SMART_IDS.join(",")}&temperature_unit=${unit === "C" ? "celsius" : "fahrenheit"}&timezone=auto&forecast_days=7`, 15000));
     const out = {};
     for (const id of SMART_IDS) {
       const arr = d.daily?.[`${v}_${id}`] || (SMART_IDS.length === 1 ? d.daily?.[v] : null);
@@ -766,7 +785,7 @@ function currentModelsDaily(lat, lon, code, unit, kind) {
 
 async function smartFor(st, code, unit, kind, date, localToday) {
   const [skill, cur] = await Promise.all([
-    stationSkill(st, code, unit, kind).catch(() => null),
+    stationSkill(st, code, unit, kind).catch(e => ({ days: 0, leads: {}, reason: "Couldn't load model history (" + (e && e.message || e) + ")" })),
     currentModelsDaily(st[0], st[1], code, unit, kind)
   ]);
   const today = cur && cur[date];
