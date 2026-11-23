@@ -788,7 +788,11 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
   clearTimeout(t2);
   const byDate = (a, b) => a.date.localeCompare(b.date) || a.city.localeCompare(b.city);
   hits.sort(byDate); overview.sort(byDate);
-  return { mode: "temp", kind, hits, overview, skipped, finished, partial };
+  // Health of the Smart forecast across markets: learned from history vs fell back to a plain average
+  const smartStats = { learned: 0, fallback: 0, none: 0, avgDays: 0 };
+  for (const o of overview) { if (!o.smart) smartStats.none++; else if (o.smart.fallback) smartStats.fallback++; else { smartStats.learned++; smartStats.avgDays += o.smart.days; } }
+  if (smartStats.learned) smartStats.avgDays = r1(smartStats.avgDays / smartStats.learned);
+  return { mode: "temp", kind, hits, overview, skipped, finished, partial, smartStats };
 }
 
 // ---------- Cross-check: run all four checks on one city/date ----------

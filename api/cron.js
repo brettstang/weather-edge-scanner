@@ -21,10 +21,12 @@ export default async function handler(req, res) {
     // Each phone chooses daily high and/or daily low alerts (older sign-ups = high only)
     const wants = s => s.kinds || { high: true };
     const t0 = Date.now();
-    const hitsByKind = { high: [], low: [] };
+    const hitsByKind = { high: [], low: [] }, smart = {};
     await Promise.all(["high", "low"].filter(k => subs.some(s => wants(s)[k])).map(async k => {
       const events = await getTempEvents(t0, k);
-      hitsByKind[k] = (await tempScan(events, t0, 1, k)).hits; // includes near misses; filtered per phone below
+      const out = await tempScan(events, t0, 1, k);
+      hitsByKind[k] = out.hits; // includes near misses; filtered per phone below
+      smart[k] = out.smartStats;
     }));
     const hits = [...hitsByKind.high, ...hitsByKind.low];
 
@@ -55,7 +57,8 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    const summary = { at: new Date().toISOString(), subscribers: subs.length, hits: hits.length, notified: sent, removed, ms: Date.now() - t0 };
+    const summary = { at: new Date().toISOString(), subscribers: subs.length, hits: hits.length, notified: sent, removed, ms: Date.now() - t0,
+      smartHits: hits.filter(h => h.triggers && h.triggers.smart !== "none" && h.triggers.openmeteo === "none").length, smart };
     await redis("SET", "cron:last", JSON.stringify(summary));
     return res.status(200).json(summary);
   } catch (e) {
