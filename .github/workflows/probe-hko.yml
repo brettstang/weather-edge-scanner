@@ -1,9 +1,0 @@
-# Temporary diagnostics (will be removed)
-name: Probe HKO
-on: workflow_dispatch
-jobs:
-  probe:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: node .github/probe/diag.mjs
