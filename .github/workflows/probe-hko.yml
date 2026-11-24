@@ -1,0 +1,13 @@
+# Temporary diagnostics (will be removed)
+name: Probe HKO
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for i in 1 2 3; do for k in high low; do
+            curl -s --max-time 70 "https://weather-edge-scanner.vercel.app/api/scan?kind=$k" > o.json
+            node -e 'const o=require("./o.json"); const s=(o.skipped||[]).reduce((a,x)=>(a[x.reason]=(a[x.reason]||0)+1,a),{}); console.log("RESULT run '$i' '$k' markets", (o.overview||[]).length, "hits", (o.hits||[]).length, "finished", o.finished, "partial", o.partial, JSON.stringify(s))'
+            sleep 20
+          done; done
