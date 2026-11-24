@@ -104,9 +104,28 @@ async function lookupStation(code) {
 }
 
 async function getJSON(url, ms = 8000) {
-  const r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(ms) });
-  if (!r.ok) throw new Error(`${r.status} from ${new URL(url).host}`);
-  return r.json();
+  // Retry briefly when a service is busy (429 = too many requests, 5xx = server hiccup) instead of dropping the market
+  for (let attempt = 0; ; attempt++) {
+    let r;
+    try { r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(ms) }); }
+    catch (e) { if (attempt < 1) { await sleep(800); continue; } throw e; }
+    if (r.ok) return r.json();
+    if ((r.status === 429 || r.status >= 500) && attempt < 2) { await sleep(1200 * (attempt + 1) + Math.random() * 600); continue; }
+    throw new Error(`${r.status} from ${new URL(url).host}`);
+  }
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// In-memory cache for a warm server: entries expire after 15 min, and a failed lookup is forgotten
+// straight away (before, one failure stuck until the server restarted, silently dropping that market)
+function ttlCache(ttl = 15 * 60000) {
+  const store = new Map();
+  return new Proxy({}, {
+    get(_, k) { const e = store.get(k); if (!e) return undefined; if (Date.now() - e.t > ttl) { store.delete(k); return undefined; } return e.v; },
+    set(_, k, v) { const e = { v, t: Date.now() }; store.set(k, e);
+      if (v && typeof v.catch === "function") v.catch(() => { if (store.get(k) === e) store.delete(k); });
+      return true; },
+    has(_, k) { return store.has(k); }, deleteProperty(_, k) { store.delete(k); return true; }
+  });
 }
 // Run at most n requests of one kind at a time, so a big scan doesn't hit a service's rate limit
 function limiter(n) {
@@ -221,7 +240,7 @@ function yesPrice(m) {
   } catch { return null; }
 }
 
-const forecastCache = {};
+const forecastCache = ttlCache();
 async function forecastHigh(lat, lon, unit, date, kind = "high") {
   const v = kind === "low" ? "temperature_2m_min" : "temperature_2m_max";
   const key = `${lat},${lon},${unit},${kind}`;
@@ -241,7 +260,7 @@ async function forecastHigh(lat, lon, unit, date, kind = "high") {
 
 // ---------- Observed temperatures so far today (aviationweather.gov METARs) ----------
 // Airport reports, roughly hourly. Weather Underground's airport history is built from these.
-const obsCache = {};
+const obsCache = ttlCache();
 const signed = (s, d) => (s === "1" ? -1 : 1) * Number(d) / 10;
 export function parseMetar(o) {
   const raw = o.rawOb || o.raw_text || "";
@@ -374,7 +393,7 @@ const hh = h => String(h).padStart(2, "0") + ":00";
 // An hour is "rainy" when Open-Meteo forecasts at least RAIN_PROB % chance AND at least RAIN_MM mm.
 // A day is flagged when it has RAIN_STREAK or more rainy hours in a row (station local time).
 const RAIN_PROB = 50, RAIN_MM = 0.1, RAIN_STREAK = 3;
-const rainCache = {};
+const rainCache = ttlCache();
 async function rainDay(lat, lon, date) {
   const key = `${lat},${lon}`;
   if (!rainCache[key]) rainCache[key] = getJSON(
@@ -440,7 +459,7 @@ async function rainScan(events, t0) {
 // Flags days where the forecast daily high happens at night (21:00–05:00 local),
 // i.e. the warmest night hour is warmer than every daytime hour (06:00–20:00).
 const isNight = h => h >= 21 || h <= 5;
-const hourlyTempCache = {};
+const hourlyTempCache = ttlCache();
 async function hourlyTemps(lat, lon, unit) {
   const key = `${lat},${lon},${unit}`;
   if (!hourlyTempCache[key]) hourlyTempCache[key] = getJSON(
@@ -531,7 +550,7 @@ async function nightScan(events, t0, kind = "high") {
 // Flags days where EVERY daylight hour (sunrise..sunset, station local time) has
 // cloud cover <= SUN_MAX_CLOUD % and no precipitation.
 const SUN_MAX_CLOUD = 10;
-const skyCache = {};
+const skyCache = ttlCache();
 async function skyData(lat, lon) {
   const key = `${lat},${lon}`;
   if (!skyCache[key]) skyCache[key] = getJSON(
@@ -598,7 +617,7 @@ const MODELS = [
   ["meteofrance_seamless", "Météo-France"],
   ["jma_seamless", "JMA (Japan)"]
 ];
-const modelCache = {};
+const modelCache = ttlCache();
 function modelHighs(lat, lon, unit, kind = "high") {
   const v = kind === "low" ? "temperature_2m_min" : "temperature_2m_max";
   const key = `${lat},${lon},${unit},${kind}`;
@@ -871,7 +890,7 @@ async function smartFor(st, code, unit, kind, date, localToday) {
 export async function tempScan(events, t0, near = 0, kind = "high") {
   const hi = kind !== "low";
   const hits = [], skipped = [], overview = [];
-  let finished = 0, partial = false;
+  let finished = 0, partial = false, noForecast = 0;
   const work = Promise.all(events.map(async ev => { try {
     const code = findStation(ev);
     const st = code ? await lookupStation(code) : null;
@@ -880,14 +899,14 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
     const city = (ev.title || "").replace(/.*(?:highest|lowest) temperature in /i, "").replace(/ on .*/i, "").replace(/\?$/, "");
     const row = { city, date, station: code, stationName: st[2], unit: null, forecast: null, low: null, high: null,
                   url: `https://polymarket.com/event/${ev.slug}`, slug: ev.slug, hit: null };
-    let isFinished = false, smart, smartTried = false;
+    let isFinished = false, smart, smartTried = false, fcFailed = false;
     for (const m of ev.markets || []) {
       if (m.closed) continue;
       const label = m.groupItemTitle || m.question || "";
       const b = parseBucket(label);
       if (!b) continue;
       let f;
-      try { f = await forecastHigh(st[0], st[1], b.unit, date, kind); } catch { f = null; }
+      try { f = await forecastHigh(st[0], st[1], b.unit, date, kind); } catch { f = null; fcFailed = true; }
       if (f && !smartTried && date >= f.localToday) {
         smartTried = true;
         try { smart = await smartFor(st, code, b.unit, kind, date, f.localToday); } catch { smart = null; }
@@ -940,11 +959,13 @@ export async function tempScan(events, t0, near = 0, kind = "high") {
     }
     if (isFinished) { finished++; return; }
     if (row.forecast != null) overview.push(row);
+    else if (fcFailed) { noForecast++; skipped.push({ title: ev.title, reason: "Open-Meteo forecast didn't load" }); }
   } catch (e) { skipped.push({ title: ev.title, reason: "Error: " + (e && e.message || e) }); } }));
   let timer;
   const stop = new Promise(r => { timer = setTimeout(() => { partial = true; r(); }, Math.max(5000, 40000 - (Date.now() - t0))); });
   await Promise.race([work, stop]);
   clearTimeout(timer);
+  if (noForecast) partial = true;
   // Compare each hit against several independent models (max ~12 s)
   let t2;
   await Promise.race([
@@ -1010,7 +1031,7 @@ async function detailOne(slug, near) {
 }
 
 // ---------- Day graph: hourly forecast + real airport readings for one market's day ----------
-const modelHourlyCache = {};
+const modelHourlyCache = ttlCache();
 function modelHourly(lat, lon, unit, pastDays = 1) {
   const key = `${lat},${lon},${unit},${pastDays}`;
   if (!modelHourlyCache[key]) modelHourlyCache[key] = Promise.all(MODELS.map(async ([id, name]) => {
@@ -1022,7 +1043,7 @@ function modelHourly(lat, lon, unit, pastDays = 1) {
   }));
   return modelHourlyCache[key];
 }
-const blendCache = {};
+const blendCache = ttlCache();
 function blendHourly(lat, lon, unit, pastDays) {
   const key = `${lat},${lon},${unit},${pastDays}`;
   if (!blendCache[key]) blendCache[key] = getJSON(

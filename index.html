@@ -526,7 +526,7 @@ function render(data) {
       <button class="stat hit tap" data-sec="sec-hits"${hits.length ? "" : " disabled"}><b>${hits.length}</b><span>Edge hits</span><small>${hits.length ? "Tap to view ›" : "None"}</small></button>
       <button class="stat near tap" data-sec="sec-near"${near.length ? "" : " disabled"}><b>${near.length}</b><span>Near misses</span><small>${near.length ? "Tap to view ›" : $("near").checked ? "None" : "Switch is off"}</small></button>
     </div>
-    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Some markets didn’t load (a data service was busy), so they may be missing. Try scanning again.</div>` : ""}
     <div class="when">Updated ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })}</div>`;
 
   if (!data.hits.length) {
@@ -588,7 +588,7 @@ function renderRain(data) {
       <div class="stat hit"><b>${data.hits.length}</b><span>Steady rain</span></div>
       <div class="stat near"><b>${ov.filter(o => o.rainyHours > 0 && o.longest < 3).length}</b><span>Some rain</span></div>
     </div>
-    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Some markets didn’t load (a data service was busy), so they may be missing. Try scanning again.</div>` : ""}
     <div class="when">Rain scan · ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })} · times are local to each city</div>
     <div class="section">Steady rain (3+ hours in a row)</div>`;
   if (!data.hits.length) html += `<div class="card empty">${NURSE}<span class="rx">${rx()}</span>No city has 3+ rainy hours in a row on any open day.</div>`;
@@ -641,7 +641,7 @@ function renderNight(data) {
       <div class="stat hit"><b>${data.hits.length}</b><span>Night highs</span></div>
       <div class="stat near"><b>${ov.filter(o => !o.night && o.margin > -2).length}</b><span>Within 2°</span></div>
     </div>
-    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Some markets didn’t load (a data service was busy), so they may be missing. Try scanning again.</div>` : ""}
     <div class="when">Night high scan · ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })} · times are local to each city</div>
     <div class="section">High comes at night (9pm–5am)</div>`;
   if (!data.hits.length) html += `<div class="card empty">${NURSE}<span class="rx">${rx()}</span>Every open day peaks in the daytime right now.</div>`;
@@ -702,7 +702,7 @@ function renderSun(data) {
       <div class="stat hit"><b>${data.hits.length}</b><span>Sunny days</span></div>
       <div class="stat near"><b>${ov.filter(o => !o.clear && o.maxCloud <= lim + 20 && o.dayRain === 0).length}</b><span>Within 20%</span></div>
     </div>
-    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Some markets didn’t load (a data service was busy), so they may be missing. Try scanning again.</div>` : ""}
     <div class="when">Sunny day scan · ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })} · times are local to each city</div>
     <div class="section">Sunny all day (≤${lim}% cloud, no rain)</div>`;
   if (!data.hits.length) html += `<div class="card empty">${NURSE}<span class="rx">${rx()}</span>No open day stays at or under ${lim}% cloud from sunrise to sunset. Try raising the cloud limit.</div>`;
@@ -1095,7 +1095,7 @@ function renderDayLow(data) {
       <div class="stat hit"><b>${data.hits.length}</b><span>Day lows</span></div>
       <div class="stat near"><b>${ov.filter(o => !o.night && o.margin > -2).length}</b><span>Within 2°</span></div>
     </div>
-    ${data.partial ? `<div class="when" style="color:var(--amber)">Polymarket was slow, so some markets may be missing. Try scanning again.</div>` : ""}
+    ${data.partial ? `<div class="when" style="color:var(--amber)">Some markets didn’t load (a data service was busy), so they may be missing. Try scanning again.</div>` : ""}
     <div class="when">Day low scan · ${new Date(data.scannedAt).toLocaleTimeString([], { hour:"numeric", minute:"2-digit" })} · times are local to each city</div>
     <div class="section">Low comes in the daytime (9am–5pm)</div>`;
   if (!data.hits.length) html += `<div class="card empty">${NURSE}<span class="rx">${rx()}</span>Every open day bottoms out overnight right now.</div>`;
