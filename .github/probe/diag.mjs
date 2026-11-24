@@ -3,11 +3,11 @@ const run = async q => { const res = { setHeader(){}, status(c){ this.c=c; retur
 const ext = (pts, lo, a, b) => { const v = pts.filter(p => p.m >= a && p.m < b).map(p => p.v); return v.length ? (lo ? Math.min(...v) : Math.max(...v)) : null; };
 let tS = 0, tB = 0, tn = 0;
 for (const kind of ["low", "high"]) {
-  const sc = await run({ kind, near: "1" });
+  const sc = await run({ kind, near: "1" }); await new Promise(r => setTimeout(r, 20000));
   const seen = new Set();
   for (const row of sc.overview) {
-    if (seen.has(row.city) || seen.size >= 9) continue; seen.add(row.city);
-    const S = row.smart;
+    if (seen.has(row.city) || seen.size >= 6) continue; seen.add(row.city);
+    const S = row.smart; await new Promise(r => setTimeout(r, 4000));
     const g = await run({ mode: "graph", slug: row.slug, days: "4" });
     if (!g || !g.smart) { console.log(`RESULT ${kind} ${row.city} no smart line: ${g && g.smartError}`); continue; }
     const lo = kind === "low"; let sE = 0, bE = 0, n = 0;
