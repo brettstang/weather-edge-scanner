@@ -1126,7 +1126,12 @@ async function graphOne(slug, days = 1) {
         // Gently pull the market day's remaining high/low onto the card's Smart value (±3 h bell)
         const e = ahead.reduce((a, p) => !a || (kind === "low" ? p.v < a.v : p.v > a.v) ? p : a, null);
         const delta = e ? sm.value - e.v : 0;
-        points = points.map(p => ({ m: p.m, v: p.v + (e && p.m >= Math.max(dayStart, pastEnd) ? delta * Math.exp(-(((p.m - e.m) / 180) ** 2)) : 0) }));
+        points = points.map(p => {
+          if (!e || p.m < Math.max(dayStart, pastEnd)) return p;
+          let v = p.v + delta * Math.exp(-(((p.m - e.m) / 180) ** 2));
+          if (p.m < days * 1440) { if (kind === "low" && delta > 0) v = Math.max(v, sm.value); else if (kind !== "low" && delta < 0) v = Math.min(v, sm.value); }
+          return { m: p.m, v };
+        });
         // Past days: pull each day's high/low onto what the Smart daily forecast said a day ahead
         // (learned without that day), so the past line shows the Smart forecast's real track record
         if (sm.pastDaily && pr) {
@@ -1136,7 +1141,12 @@ async function graphOne(slug, days = 1) {
             const target = sm.pastDaily[d]; if (target == null || idx.length < 18) continue;
             const ei = idx.reduce((a, i) => a == null || (kind === "low" ? points[i].v < points[a].v : points[i].v > points[a].v) ? i : a, null);
             const dd = target - points[ei].v, em = points[ei].m;
-            for (const i of idx) points[i] = { m: points[i].m, v: points[i].v + dd * Math.exp(-(((points[i].m - em) / 240) ** 2)) };
+            for (const i of idx) {
+              let v = points[i].v + dd * Math.exp(-(((points[i].m - em) / 240) ** 2));
+              // Raising a low / lowering a high: no other hour that day may stay beyond the Smart value
+              if (kind === "low" && dd > 0) v = Math.max(v, target); else if (kind !== "low" && dd < 0) v = Math.min(v, target);
+              points[i] = { m: points[i].m, v };
+            }
           }
         }
         points = points.map(p => ({ m: p.m, v: Math.round(p.v * 10) / 10 }));
