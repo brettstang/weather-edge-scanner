@@ -424,13 +424,13 @@ function smartBox(h) {
   const st = h.triggers?.smart || "none";
   const short = h.smartPast == null ? "" : h.smartPast >= 0 ? (h.smartPast === 0 ? "right on the line" : `${h.smartPast}° past the line`) : `${Math.abs(h.smartPast)}° short`;
   const pill = st === "hit" ? `<span class="pill pass">✓ IN BUCKET</span>` : st === "near" ? `<span class="pill near">NEAR</span>` : `<span class="pill na">NO HIT</span>`;
-  const mix = S.used.map(u => `<span class="mix"><i style="background:${MODEL_COLORS[u.id] || "#aaa"}"></i>${esc(SHORT[u.id] || u.name)} ${Math.round(u.w * 100)}%${!S.fallback && Math.abs(u.bias) >= 0.1 ? ` <small>${u.bias > 0 ? "−" : "+"}${Math.abs(u.bias).toFixed(1)}°</small>` : ""}</span>`).join("");
+  const mix = S.used.map(u => `<span class="mix"><i style="background:${MODEL_COLORS[u.id] || "#aaa"}"></i>${esc(SHORT[u.id] || u.name)}${S.used.length > 1 ? ` ${Math.round(u.w * 100)}%` : ""}${!S.fallback && Math.abs(u.bias) >= 0.1 ? ` <small>${u.bias > 0 ? "−" : "+"}${Math.abs(u.bias).toFixed(1)}°</small>` : ""}</span>`).join("");
   const track = S.fallback
     ? `<div class="sd">${esc(S.reason || "Not enough history yet")}, so this is a plain average of the models.</div>`
     : `<div class="sd">Past ${S.days} days at ${esc(h.station)}: Smart missed by <b>±${S.smartMiss ?? "?"}°</b>${S.blendMiss != null ? `, Open-Meteo by <b>±${S.blendMiss}°</b>` : ""} (forecasts made ${S.lead === 2 ? "2 days" : "1 day"} ahead).</div>`;
   return `<div class="smartbox">
     <div class="sh"><span>🧠 Smart ${lo ? "low" : "high"}</span><b>${Math.round(v * 10) / 10}°${h.unit}</b>${pill}</div>
-    <div class="sd">${short ? `Rounds to ${h.smartRounded}°, ${short}. ` : ""}${S.fallback ? "" : "Best models here, bias-corrected:"}</div>
+    <div class="sd">${short ? `Rounds to ${h.smartRounded}°, ${short}. ` : ""}${S.fallback ? "" : "Most accurate model here (past 7 days), bias-corrected:"}</div>
     <div class="mixes">${mix}</div>
     ${track}
   </div>`;
@@ -835,7 +835,7 @@ function dayGraph(g, opt = {}) {
     <div class="gtip">Tap a name to highlight its line. Shaded area = hours already passed.</div>
     <button class="grange" data-days="${days > 1 ? 1 : 4}">${days > 1 ? "📅 Show just this day" : "🗓️ Show past 3 days"}</button>
     ${days > 1 && best ? `<div class="gtip">Most accurate here over the past days: <b style="color:${colorOf(best[0])}">${esc(best[0] === "blend" ? "Blend" : best[0] === "smart" ? "🧠 Smart" : SHORT[best[0]] || best[0])}</b> (±${best[1].avg.toFixed(1)}° on the daily ${word}). ${g.pastAhead ? "Past hours show what each source forecast 1 day ahead, so this is a fair test." : "Past hours use each model's latest run, so real day-ahead forecasts miss by more."}</div>` : ""}
-    ${g.smart && g.smart.hourly ? `<div class="gtip">🧠 Hour-by-hour correction at ${esc(g.station)}: <b>${g.smart.hourly.strength === 1 ? "full" : g.smart.hourly.strength === 0.5 ? "half" : "off"}</b> — tested on the past week, the Smart line missed by ±${g.smart.hourly.miss}° hour by hour${g.smart.hourly.blendMiss != null ? ` (Open-Meteo blend ±${g.smart.hourly.blendMiss}°)` : ""}.</div>` : ""}`;
+    ${g.smart && !g.smart.fallback && g.smart.lineModels ? `<div class="gtip">🧠 Smart line = <b>${esc(SHORT[g.smart.lineModels[0]] || g.smart.lineModels[0])}</b>, the most accurate model at ${esc(g.station)} over the past 7 days, with its high/low moved by its learned bias.</div>` : ""}`;
   if (opt.fs) return `
     <div class="fsl">
       <div class="fsc">${gsumHtml}${svgHtml}</div>
