@@ -1,5 +1,5 @@
 // Caches the app shell so it opens instantly, and shows auto-scan notifications.
-const CACHE = "weather-scanner-v8";
+const CACHE = "weather-scanner-v9";
 const SHELL = ["/", "/index.html", "/manifest.json", "/icon.png", "/apple-touch-icon.png", "/nurse.jpg"];
 self.addEventListener("install", e => { self.skipWaiting(); e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); });
 self.addEventListener("activate", e => e.waitUntil(

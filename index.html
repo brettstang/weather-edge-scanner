@@ -816,6 +816,14 @@ function dayGraph(g, opt = {}) {
         <path d="${path(g.smart.points)}" fill="none" stroke="rgba(10,8,30,.75)" stroke-width="7" stroke-linejoin="round"/>
         <path d="${path(g.smart.points)}" fill="none" stroke="${SMART_COLOR}" stroke-width="3.6" stroke-linejoin="round" style="filter:drop-shadow(0 0 4px rgba(192,132,252,.8))"/>
         ${(() => { const last = g.smart.points[g.smart.points.length - 1]; return `<text x="${Math.min(x(last.m) - 2, W - R - 2)}" y="${y(last.v) + (low ? 14 : -7)}" text-anchor="end" font-size="10.5" font-weight="800" fill="${SMART_COLOR}">🧠 Smart</text>`; })()}
+        ${Array.from({ length: days }, (_, i) => {
+          // Purple ring where the Smart line reaches each day's high/low (bigger + labelled on the market day)
+          const e = extOf(g.smart.points.filter(p => p.m >= i * 1440 && p.m < (i + 1) * 1440)); if (!e) return "";
+          const main = i === days - 1, cx = x(e.m), cy = y(e.v), ty = cy + (low ? 19 : -11);
+          return `<circle cx="${cx}" cy="${cy}" r="${main ? 7 : 5}" fill="rgba(20,22,43,.6)" stroke="${SMART_COLOR}" stroke-width="${main ? 3 : 2}"/>
+            <circle cx="${cx}" cy="${cy}" r="2" fill="${SMART_COLOR}"/>
+            <text x="${Math.max(L + 14, Math.min(cx, W - R - 14))}" y="${ty}" text-anchor="middle" font-size="${main ? 11 : 9.5}" font-weight="800" fill="${SMART_COLOR}" stroke="#14162b" stroke-width="3" paint-order="stroke">${main ? "🧠 " : ""}${r1(e.v)}°</text>`;
+        }).join("")}
       </g>` : ""}
       <g data-line="obs">
         ${g.observed.length > 1 ? `<path d="${path(g.observed)}" fill="none" stroke="rgba(0,0,0,.55)" stroke-width="5"/><path d="${path(g.observed)}" fill="none" stroke="#fff" stroke-width="2.6"/>` : ""}
